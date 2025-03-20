@@ -1,14 +1,14 @@
 from dataclasses import dataclass
 from typing import Callable, List, Tuple
 
-import centrex_TlF
+import centrex_tlf
 import numpy as np
-from centrex_TlF import State
-from centrex_TlF.constants import constants_X
-from centrex_TlF.couplings.matrix_elements import calculate_ED_ME_mixed_state
-from centrex_TlF.hamiltonian.utils import threej_f
+from centrex_tlf.constants import XConstants
+from centrex_tlf.couplings.matrix_elements import calculate_ED_ME_mixed_state
+from centrex_tlf.hamiltonian.wigner import threej_f
+from centrex_tlf.states import State
 from scipy import constants
-from scipy.misc import derivative
+from scipy.differentiate import derivative
 
 from .intensity_profiles import Intensity
 
@@ -23,10 +23,15 @@ class Polarization:
     k_vec: np.ndarray = None  # k-vector for field
     f_long: float = 1  # Factor that multiplies longitudinal component
     dir_long: np.ndarray = None
-    basis_conversion: Tuple = (np.array([0,0,1]), -np.array([0,1,0]), np.array([1,0,0]))
+    basis_conversion: Tuple = (
+        np.array([0, 0, 1]),
+        -np.array([0, 1, 0]),
+        np.array([1, 0, 0]),
+    )
 
-    def __post_init__(self, ):
-
+    def __post_init__(
+        self,
+    ):
         if self.k_vec is not None:
             # # Check that k-vector and polarization are orthogonal
             # err_msg = "k-vector and main polarization should be orthogonal: "
@@ -42,10 +47,10 @@ class Polarization:
         Returns the longitudinal polarization component.
 
         inputs:
-        R = position where longitudinal polarization is to be calculated 
+        R = position where longitudinal polarization is to be calculated
         ip = intensity profile of microwaves
         freq = Frequency of microwaves
-        dir = direction of longitudinal polarization if other than k-vector 
+        dir = direction of longitudinal polarization if other than k-vector
               (useful if using multiple bases)
         """
         # Take div of E_R along main polarization
@@ -54,11 +59,13 @@ class Polarization:
 
         # Convert polarization vector to XYZ basis using the provided basis conversion
         # vector
-        p_main = np.array([
+        p_main = np.array(
+            [
                 np.dot(self.basis_conversion[0], p_main_ini),
                 np.dot(self.basis_conversion[1], p_main_ini),
                 np.dot(self.basis_conversion[2], p_main_ini),
-                ])
+            ]
+        )
         # print(p_main)
 
         # Calculate each component of divergence
@@ -68,7 +75,11 @@ class Polarization:
             # func = lambda x: (ip.E_R(R=(R + x * unit_vec)) / ip.E_R(R=ip.R0))
 
             dx = 1e-5
-            deriv = (ip.E_R(R=(R + dx/2 * unit_vec)) - ip.E_R(R=(R - dx/2 * unit_vec)))/ ip.E_R(R=ip.R0) /dx
+            deriv = (
+                (ip.E_R(R=(R + dx / 2 * unit_vec)) - ip.E_R(R=(R - dx / 2 * unit_vec)))
+                / ip.E_R(R=ip.R0)
+                / dx
+            )
 
             # print(deriv*p_main[i])
 
@@ -125,7 +136,7 @@ class MicrowaveField:
         intensity: Intensity,
         polarization: Polarization,
         muW_freq: float,
-        QN: List[centrex_TlF.State],
+        QN: List[centrex_tlf.states.State],
         background_field: bool = False,
     ) -> None:
         self.Jg = Jg  # J for ground state
@@ -140,10 +151,12 @@ class MicrowaveField:
             background_field  # Flag to show if field is a background field
         )
 
-    def get_H_t_func(self, R_t: Callable, QN: List[centrex_TlF.State]) -> Callable:
+    def get_H_t_func(
+        self, R_t: Callable, QN: List[centrex_tlf.states.State]
+    ) -> Callable:
         """
-        Returns a function that gives Hamiltonian for the microwave field as a 
-        function of time. 
+        Returns a function that gives Hamiltonian for the microwave field as a
+        function of time.
         """
         # Find the electric field due to the microwaves as a function of time
         E_mu_t = lambda t: self.intensity.E_R(R_t(t))
@@ -162,17 +175,17 @@ class MicrowaveField:
             p = p_mu_t(t)
             pd = p.conj()
 
-            return (2 * np.pi * constants_X.D_TlF * E / 2) * (
+            return (2 * np.pi * XConstants.D_TlF * E / 2) * (
                 (p[0] * Hu_x + p[1] * Hu_y + p[2] * Hu_z)
                 + (pd[0] * Hl_x + pd[1] * Hl_y + pd[2] * Hl_z)
             )
 
         return H_t
 
-    def generate_coupling_matrices(self, QN: List[centrex_TlF.State]) -> None:
+    def generate_coupling_matrices(self, QN: List[centrex_tlf.states.State]) -> None:
         """
         Generates list of coupling Hamiltonians for x,y,z polarized microwaves
-        coupling Jg to Je in basis defined by QN. 
+        coupling Jg to Je in basis defined by QN.
         """
         Jg = self.Jg
         Je = self.Je
@@ -202,8 +215,10 @@ class MicrowaveField:
 
         self.H_list = H_list
 
-    def generate_D(self, QN: List[centrex_TlF.State], omega: float = None) -> None:
-        """ 
+    def generate_D(
+        self, QN: List[centrex_tlf.states.State], omega: float = None
+    ) -> None:
+        """
         Generates a diagonal matrix that is used to shift energies in the rotating frame
         """
         Je = self.Je
@@ -219,7 +234,11 @@ class MicrowaveField:
         self.D = D
 
     def calculate_microwave_power(
-        self, state1: State, state2: State, Omega: float, R: np.ndarray,
+        self,
+        state1: State,
+        state2: State,
+        Omega: float,
+        R: np.ndarray,
     ) -> float:
         """
         Calculates the microwave power required to have Rabi rate Omega for the microwave
@@ -241,7 +260,7 @@ class MicrowaveField:
         )
 
         # Calculate the Rabi rate for P = 1W (in Hz)
-        Omega1W = 2 * np.pi * np.abs(ME) * constants_X.D_TlF * E / 2
+        Omega1W = 2 * np.pi * np.abs(ME) * XConstants.D_TlF * E / 2
 
         # Determine what power is required (Omega \propto sqrt(Power))
         power_req = (Omega / Omega1W) ** 2
@@ -249,7 +268,11 @@ class MicrowaveField:
         self.intensity.power = power_req
 
     def calculate_rabi_rate(
-        self, state1: State, state2: State, power: float, R: np.ndarray,
+        self,
+        state1: State,
+        state2: State,
+        power: float,
+        R: np.ndarray,
     ) -> float:
         """
         Calculates the Rabi rate for given power for the microwave
@@ -274,14 +297,14 @@ class MicrowaveField:
         )
 
         # Calculate the Rabi rate for P = 1W (in Hz)
-        Omega = 2 * np.pi * np.abs(ME) * constants_X.D_TlF * E / 2
+        Omega = 2 * np.pi * np.abs(ME) * XConstants.D_TlF * E / 2
 
         return Omega
 
     def set_frequency(self, freq: float) -> None:
         """
         Sets the frequency for the microwave field.
-        
+
         inputs:
         freq = microwave frequency in Hz
         """
@@ -306,16 +329,16 @@ def make_H_mu(J1, J2, QN, pol_vec=np.array((0, 0, 1))):
     Function that generates Hamiltonian for microwave transitions between J1 and J2 (all hyperfine states) for given
     polarization of microwaves. Rotating wave approximation is applied implicitly by only taking the exp(+i*omega*t) part
     of the cos(omgega*t) into account
-    
+
     inputs:
     J1 = J of the lower rotational state being coupled
     J2 = J of upper rotational state being coupled
     QN = Quantum numbers of each index (defines basis fo matrices and vectors)
-    pol_vec = vector describing polarization 
-    
+    pol_vec = vector describing polarization
+
     returns:
-    H_mu = Hamiltonian describing coupling between 
-    
+    H_mu = Hamiltonian describing coupling between
+
     """
     # Figure out how many states there are in the system
     N_states = len(QN)
@@ -350,13 +373,13 @@ def calculate_microwave_ME(state1, state2, reduced=False, pol_vec=np.array((0, 0
     """
     Function that evaluates the microwave matrix element between two states, state1 and state2, for a given polarization
     of the microwaves
-    
+
     inputs:
     state1 = an UncoupledBasisState object
     state2 = an UncoupledBasisState object
     reduced = boolean that determines if the function returns reduced or full matrix element
     pol_vec = np.array describing the orientation of the microwave polarization in cartesian coordinates
-    
+
     returns:
     Microwave matrix element between state 1 and state2
     """
@@ -400,4 +423,3 @@ def calculate_microwave_ME(state1, state2, reduced=False, pol_vec=np.array((0, 0
             )
 
         return prefactor * M_r
-

@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Callable, List
 
-import centrex_TlF
+import centrex_tlf
 
 from .electric_fields import ElectricField
 from .magnetic_fields import MagneticField
@@ -28,9 +28,9 @@ class SlowHamiltonian(Hamiltonian):
 
     def __post_init__(self):
         if self.basis == "uncoupled":
-            self.QN = centrex_TlF.states.generate_uncoupled_states_ground(self.Js)
-            H_dict = centrex_TlF.hamiltonian.generate_uncoupled_hamiltonian_X(self.QN)
-            self.H_EB = centrex_TlF.hamiltonian.generate_uncoupled_hamiltonian_X_function(
+            self.QN = centrex_tlf.states.generate_uncoupled_states_ground(self.Js)
+            H_dict = centrex_tlf.hamiltonian.generate_uncoupled_hamiltonian_X(self.QN)
+            self.H_EB = centrex_tlf.hamiltonian.generate_uncoupled_hamiltonian_X_function(
                 H_dict
             )
         else:

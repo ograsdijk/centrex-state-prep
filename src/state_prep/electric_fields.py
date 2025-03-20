@@ -12,6 +12,8 @@ from scipy import constants
 from .core import StaticField
 from .trajectory import Trajectory
 
+efield_dir = Path(__file__).parent / "electric_fields"
+
 
 @dataclass
 class ElectricField(StaticField):
@@ -33,9 +35,9 @@ class ElectricField(StaticField):
         """
         Addition of electric fields.
         """
-        assert (
-            type(other) != ElectricField
-        ), f"Can't add {type(other)} and ElectricField"
+        assert type(other) != ElectricField, (
+            f"Can't add {type(other)} and ElectricField"
+        )
 
         E_R = lambda R: self.E_R(R) + other.E_R(R)
         return ElectricField(E_R)
@@ -68,7 +70,7 @@ class ElectricField(StaticField):
     def get_E_r(self, R: np.ndarray) -> np.ndarray:
         """
         Returns the value of the electric field in the xyz basis at position R in XYZ
-        coordinates.        
+        coordinates.
         """
         return self.R_to_r @ self.get_E_R(R)
 
@@ -121,7 +123,7 @@ class ElectricField(StaticField):
 def linear_E_field(x, z0=0, E0=200, k=100, n=np.array((0, 0, 1))):
     """
     Function that gives the electric due to an electric field that varies linearly along z.
-    
+
     inputs:
     x = position where E-field is to be evaluated [m]
     z0 = position where value of E-field is E0 [m]
@@ -155,7 +157,7 @@ def E_field_lens(x, z0=0, V=3e4, R=1.75 * 0.0254 / 2, L=0.60, l=20e-3):
     """
 
     # Calculate electric field vector (assumed to be azimuthal and perpendicular to r_vec)
-    E_vec = 2 * V / R ** 2 * np.array((-x[1], x[0], 0)).reshape(3, 1)
+    E_vec = 2 * V / R**2 * np.array((-x[1], x[0], 0)).reshape(3, 1)
 
     # Scale the field by a tanh function so it falls off outside the lens
     E_vec = (
@@ -171,10 +173,10 @@ def E_field_lens(x, z0=0, V=3e4, R=1.75 * 0.0254 / 2, L=0.60, l=20e-3):
 def lens_Ez(x, lens_z0, lens_L):
     """
     Function that evaluates the z-component of the electric field produced by the lens based on position
-    
+
     inputs:
-    x = position (in meters) where Ex is evaluated (np.array) 
-    
+    x = position (in meters) where Ex is evaluated (np.array)
+
     returns:
     E = np.array that only has z-component (in V/cm)
     """
@@ -186,17 +188,17 @@ def lens_Ez(x, lens_z0, lens_L):
     # Calculate radial scaling
     c2 = 13673437.6
     c4 = 9.4893e09
-    radial_scaling = c2 * r ** 2 + c4 * r ** 4
+    radial_scaling = c2 * r**2 + c4 * r**4
 
     # Angular function
-    angular = 2 * x[0] * x[1] / (r ** 2)
+    angular = 2 * x[0] * x[1] / (r**2)
 
     # In z the field varies as a Gaussian
     sigma = 12.811614314258744 / 1000
     z1 = lens_z0 - lens_L / 2
     z2 = lens_z0 + lens_L / 2
-    z_function = np.exp(-((x[2] - z1) ** 2) / (2 * sigma ** 2)) - np.exp(
-        -((x[2] - z2) ** 2) / (2 * sigma ** 2)
+    z_function = np.exp(-((x[2] - z1) ** 2) / (2 * sigma**2)) - np.exp(
+        -((x[2] - z2) ** 2) / (2 * sigma**2)
     )
 
     E_z = radial_scaling * angular * z_function
@@ -221,7 +223,7 @@ def E_field_ring(x, z0=0, V=2e4, R=2.25 * 0.0254):
     # The electric field is scaled so that for R = 2.25*0.0254m, get a max field
     # of E = 100000 V/m for a voltage of 20 kV
     scaling_factor = (2.25 * 0.0254) ** 2 / 20e3 * (1e5) * 3 * np.sqrt(3) / 2
-    mag_E = scaling_factor * (z - z0) / ((z - z0) ** 2 + R ** 2) ** (3 / 2) * V
+    mag_E = scaling_factor * (z - z0) / ((z - z0) ** 2 + R**2) ** (3 / 2) * V
     E[2] = mag_E
 
     # Return the electric field as an array which only has a z-component (approximation)
@@ -229,9 +231,8 @@ def E_field_ring(x, z0=0, V=2e4, R=2.25 * 0.0254):
 
 
 def Ez_from_csv(
-    path: Union[
-        Path, str
-    ] = "C:/Users/Oskari/Documents/GitHub/centrex-state-prep/electric_fields/Electric field components vs z-position_SPA_ExpeVer.csv"
+    path: Union[Path, str] = efield_dir
+    / "Electric field components vs z-position_SPA_ExpeVer.csv",
 ) -> Callable:
     """
     Makes an interpolation function for Ez based on the csv data found in path.
@@ -248,9 +249,8 @@ def Ez_from_csv(
 
 
 def Ez_from_csv_offset(
-    path: Union[
-        Path, str
-    ] = "../../../electric_fields/Electric field components vs z-position_SPA_ExpeVer_12_7mm_offset.csv"
+    path: Union[Path, str] = efield_dir
+    / "Electric field components vs z-position_SPA_ExpeVer_12_7mm_offset.csv",
 ) -> Callable:
     """
     Makes an interpolation function for Ez based on the csv data found in path.
@@ -267,9 +267,8 @@ def Ez_from_csv_offset(
 
 
 def E_SPB_from_pickle_old(
-    path: Union[
-        Path, str
-    ] = "../../electric_fields/SPB_Ex_interp_8_5_2021_V_r=500_V_off=110_V_ring=3700.pickle"
+    path: Union[Path, str] = efield_dir
+    / "SPB_Ex_interp_8_5_2021_V_r=500_V_off=110_V_ring=3700.pickle",
 ) -> Callable:
     """
     Fetches an interpolation function for based on finite element simulations for SPB
@@ -279,11 +278,14 @@ def E_SPB_from_pickle_old(
 
     return Ez_interp
 
-def E_SPB_from_pickle(fname:str ="E along r = 0_rods_wider_apart_Vring_3700_Vrod_540_rod_offset_200.pickle") -> Callable:
+
+def E_SPB_from_pickle(
+    fname: str = "E along r = 0_rods_wider_apart_Vring_3700_Vrod_540_rod_offset_200.pickle",
+) -> Callable:
     """
     Fetches an interpolation function for electric field based on finite element simulations for SPB
     """
-    path = "../../electric_fields/"+fname
+    path = efield_dir / fname
 
     with open(path, "rb") as f:
         E_interps = pickle.load(f)
@@ -291,4 +293,3 @@ def E_SPB_from_pickle(fname:str ="E along r = 0_rods_wider_apart_Vring_3700_Vrod
     E_func = lambda Z: np.array([E_interps[0](Z), E_interps[1](Z), E_interps[2](Z)])
 
     return E_func
-

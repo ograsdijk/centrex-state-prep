@@ -13,12 +13,13 @@ setup(
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     install_requires=[
-        "numpy>=1.21.5",
+        "numpy>=2",
         "scipy",
-        "centrex_TlF",
+        "centrex_tlf",
         "matplotlib",
         "pandas",
         "joblib",
         "dill",
     ],
+    include_package_data=True,
 )

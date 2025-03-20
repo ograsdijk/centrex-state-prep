@@ -1,12 +1,18 @@
 import pickle
-from typing import Tuple
+from typing import Sequence, Tuple
 
 import numpy as np
-from centrex_TlF import State, UncoupledBasisState
+import numpy.typing as npt
+from centrex_tlf.states import (
+    State,
+    UncoupledBasisState,
+    UncoupledState,
+    find_closest_vector_idx,
+)
 
 
 def vector_to_state(state_vector, QN, E=None):
-    state = State()
+    state = State([])
 
     # Get data in correct format for initializing state object
     for j, amp in enumerate(state_vector):
@@ -14,35 +20,35 @@ def vector_to_state(state_vector, QN, E=None):
 
     return state
 
-def matrix_to_states(V, QN, E = None):
-    #Find dimensions of matrix
-    matrix_dimensions = V.shape
-    
-    #Initialize a list for storing eigenstates
-    eigenstates = []
-    
-    for i in range(0,matrix_dimensions[1]):
-        #Find state vector
-        state_vector = V[:,i]
 
-        #Ensure that largest component has positive sign
+def matrix_to_states(V, QN, E=None):
+    # Find dimensions of matrix
+    matrix_dimensions = V.shape
+
+    # Initialize a list for storing eigenstates
+    eigenstates = []
+
+    for i in range(0, matrix_dimensions[1]):
+        # Find state vector
+        state_vector = V[:, i]
+
+        # Ensure that largest component has positive sign
         index = np.argmax(np.abs(state_vector))
         state_vector = state_vector * np.sign(state_vector[index])
-        
+
         state = State()
-        
-        #Get data in correct format for initializing state object
+
+        # Get data in correct format for initializing state object
         for j, amp in enumerate(state_vector):
-            state += amp*QN[j]
-                    
+            state += amp * QN[j]
+
         if E is not None:
             state.energy = E[i]
 
-        #Store the state in the list
+        # Store the state in the list
         eigenstates.append(state)
-        
-    
-    #Return the list of states
+
+    # Return the list of states
     return eigenstates
 
 
@@ -143,3 +149,17 @@ def make_QN(Jmin, Jmax, I1=1 / 2, I2=1 / 2):
     ]
 
     return QN
+
+
+def calculate_transition_frequency(
+    state1: UncoupledState,
+    state2: UncoupledState,
+    ham: npt.NDArray[np.complex128],
+    QN: Sequence[UncoupledBasisState],
+) -> float:
+    D, V = np.linalg.eigh(ham)
+    svec1 = state1.state_vector(QN)
+    svec2 = state2.state_vector(QN)
+    id1 = find_closest_vector_idx(svec1, V)
+    id2 = find_closest_vector_idx(svec2, V)
+    return (D[id2] - D[id1]).real / (2 * np.pi)

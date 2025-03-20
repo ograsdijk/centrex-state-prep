@@ -6,8 +6,7 @@ from typing import Callable, List, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
-from centrex_TlF import State
-from centrex_TlF.constants.constants_X import D_TlF
+from centrex_tlf.states import State
 
 from .electric_fields import ElectricField
 from .hamiltonians import Hamiltonian
@@ -37,7 +36,7 @@ class CouplingPlotter:
 
     def plot_coupling_strengths(self, ax=None):
         """
-        Plots the coupling strengths for all the state pairs. 
+        Plots the coupling strengths for all the state pairs.
         """
         if ax is None:
             fig, ax = plt.subplots()
@@ -93,7 +92,7 @@ class CouplingPlotter:
 
     def _find_state_vecs(self, state) -> np.ndarray:
         """
-        Finds exact state vecs for a state at all times in t_array 
+        Finds exact state vecs for a state at all times in t_array
         """
         # Find the index that corresponds to the state
         idx = find_max_overlap_idx(state.state_vector(self.hamiltonian.QN), self.V_ref)
@@ -118,7 +117,7 @@ class CouplingPlotter:
 
     def _calculate_matrix_elements(self) -> List[np.ndarray]:
         """
-        Returns matrix element between each pair of states at eact time in 
+        Returns matrix element between each pair of states at eact time in
         t_array
         """
         # List for storing results

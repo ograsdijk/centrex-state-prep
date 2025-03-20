@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Tuple
 
-import centrex_TlF
+import centrex_tlf
 import dill
 import matplotlib.pyplot as plt
 import numpy as np
@@ -24,10 +24,10 @@ class SimulationResult:
     Class for storing results from simulations.
 
     t_array         : times at which results were returned (seconds)
-    psis            : state vectors at each time when starting from initial states defined in 
+    psis            : state vectors at each time when starting from initial states defined in
                       initial_states
     energies        : energies of all eigenstates of the hamiltonian at each time (2pi*Hz)
-    probabilities   : for each state in initial staets, the probability of being found in 
+    probabilities   : for each state in initial staets, the probability of being found in
                       each eigenstate of the hamiltonian
     V_ref           : reference matrix of eigenstates of hamiltonian which tells what state each
                       index of energies and states corresponds to
@@ -36,7 +36,7 @@ class SimulationResult:
     trajectory: Trajectory
     electric_field: ElectricField
     magnetic_field: MagneticField
-    initial_states: List[centrex_TlF.State]
+    initial_states: List[centrex_tlf.states.State]
     hamiltonian: Hamiltonian
     microwave_fields: List[MicrowaveField]
     t_array: np.ndarray
@@ -52,11 +52,11 @@ class SimulationResult:
 
     def plot_state_probability(
         self,
-        state: centrex_TlF.State,
-        initial_state: centrex_TlF.State,
+        state: centrex_tlf.states.State,
+        initial_state: centrex_tlf.states.State,
         ax: plt.Axes = None,
         position: bool = False,
-        state_mapper: Callable = None
+        state_mapper: Callable = None,
     ) -> None:
         """
         Plots the probability of being found in a given adiabatically evolved eigenstate
@@ -67,8 +67,12 @@ class SimulationResult:
 
         probs = self.get_state_probability(state, initial_state)
         label = (
-            state.remove_small_components(tol=0.1).normalize().make_real().__repr__() if not state_mapper
-            else state_mapper(state).remove_small_components(tol=0.1).normalize().make_real().__repr__()
+            state.remove_small_components(tol=0.1).normalize().__repr__()
+            if not state_mapper
+            else state_mapper(state)
+            .remove_small_components(tol=0.1)
+            .normalize()
+            .__repr__()
         )
         if position:
             ax.plot(self.z_array / 1e-2, probs, label=label)
@@ -79,11 +83,11 @@ class SimulationResult:
 
     def plot_state_probabilities(
         self,
-        states: List[centrex_TlF.State],
-        initial_state: centrex_TlF.State,
+        states: List[centrex_tlf.states.State],
+        initial_state: centrex_tlf.states.State,
         ax: plt.Axes = None,
         position: bool = False,
-        state_mapper: Callable = None
+        state_mapper: Callable = None,
     ) -> None:
         """
         Plots probabilities over time for states specified in the list states.
@@ -96,11 +100,14 @@ class SimulationResult:
                 initial_state,
                 ax=ax,
                 position=position,
-                state_mapper=state_mapper
-                )
+                state_mapper=state_mapper,
+            )
 
     def get_state_probability(
-        self, state: centrex_TlF.State, initial_state: centrex_TlF.State, ax=None
+        self,
+        state: centrex_tlf.states.State,
+        initial_state: centrex_tlf.states.State,
+        ax=None,
     ):
         """
         Returns the probability of being found in given adiabatically evolved state
@@ -115,8 +122,8 @@ class SimulationResult:
         return self.probabilities[:, index_ini, index_state]
 
     def find_large_prob_states(
-        self, initial_state: centrex_TlF.State, N: int = 5
-    ) -> List[centrex_TlF.State]:
+        self, initial_state: centrex_tlf.states.State, N: int = 5
+    ) -> List[centrex_tlf.states.State]:
         """
         Returns the N states with the largest mean probabilities for given initial
         state.
@@ -133,8 +140,8 @@ class SimulationResult:
 
     def plot_state_energy(
         self,
-        state: centrex_TlF.State,
-        zero_state: centrex_TlF = None,
+        state: centrex_tlf.states.State,
+        zero_state: centrex_tlf.states = None,
         ax: plt.Axes = None,
     ):
         """
@@ -158,8 +165,8 @@ class SimulationResult:
 
     def plot_state_energies(
         self,
-        states: List[centrex_TlF.State],
-        zero_state: centrex_TlF.State,
+        states: List[centrex_tlf.states.State],
+        zero_state: centrex_tlf.states.State,
         ax: plt.Axes = None,
     ) -> None:
         """
@@ -173,7 +180,7 @@ class SimulationResult:
 
         return energies
 
-    def get_state_energy(self, state: centrex_TlF.State) -> np.ndarray:
+    def get_state_energy(self, state: centrex_tlf.states.State) -> np.ndarray:
         """
         Gets the energy of state for all values in t_array.
         """
@@ -184,7 +191,7 @@ class SimulationResult:
 
         return self.energies[:, index_state]
 
-    def get_state_energy_diabatic(self, state: centrex_TlF.State) -> np.array:
+    def get_state_energy_diabatic(self, state: centrex_tlf.states.State) -> np.array:
         """
         Gets the energy of state that is closes to provided state at each time step.
 
@@ -214,7 +221,7 @@ class Simulator:
     trajectory: Trajectory
     electric_field: ElectricField
     magnetic_field: MagneticField
-    initial_states_approx: centrex_TlF.State
+    initial_states_approx: centrex_tlf.states.State
     hamiltonian: Hamiltonian
     microwave_fields: List[MicrowaveField] = None
 
@@ -223,7 +230,8 @@ class Simulator:
         self.initial_states = None
 
     def run(
-        self, N_steps=int(1e4),
+        self,
+        N_steps=int(1e4),
     ):
         """
         Runs the simulation.
@@ -305,7 +313,7 @@ class Simulator:
 
     def init_state_vecs(self, H_0) -> None:
         """
-        Generates state vectors based on self.initial_states in the basis 
+        Generates state vectors based on self.initial_states in the basis
         of self.hamiltonian
         """
 
@@ -315,9 +323,7 @@ class Simulator:
         self.psis = []
         _, V = np.linalg.eigh(H_0)
         for state in self.initial_states_approx:
-            idx = find_max_overlap_idx(
-                state.state_vector(self.hamiltonian.QN), V
-            )
+            idx = find_max_overlap_idx(state.state_vector(self.hamiltonian.QN), V)
             self.psis.append(V[:, idx])
             self.initial_states.append(vector_to_state(V[:, idx], self.hamiltonian.QN))
 
@@ -497,8 +503,6 @@ class Simulator:
 
         return psis_t, energies, probabilities
 
-    
-    
     def calculate_probabilities(self, psis: np.ndarray, V: np.ndarray) -> np.ndarray:
         """
         Given state vectors as columns of psi, for each state vector, returns the
@@ -512,4 +516,3 @@ class Simulator:
         overlaps = np.einsum("ij,kj->ki", V.conj().T, psis)
 
         return np.abs(overlaps) ** 2
-
