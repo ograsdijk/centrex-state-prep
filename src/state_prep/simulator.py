@@ -1,7 +1,8 @@
 import pickle
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import centrex_tlf
 import dill
@@ -52,11 +53,11 @@ class SimulationResult:
 
     def plot_state_probability(
         self,
-        state: centrex_tlf.states.State,
-        initial_state: centrex_tlf.states.State,
-        ax: plt.Axes = None,
+        state: centrex_tlf.states.UncoupledState,
+        initial_state: centrex_tlf.states.UncoupledState,
+        ax: Optional[plt.Axes] = None,
         position: bool = False,
-        state_mapper: Callable = None,
+        state_mapper: Optional[Callable] = None,
     ) -> None:
         """
         Plots the probability of being found in a given adiabatically evolved eigenstate
@@ -66,8 +67,11 @@ class SimulationResult:
             fig, ax = plt.subplots()
 
         probs = self.get_state_probability(state, initial_state)
+
+        label_state = state.remove_small_components(tol=0.1)
+        label_state.data = [(amp.real, stat) for amp, stat in label_state.data]
         label = (
-            state.remove_small_components(tol=0.1).normalize().__repr__()
+            label_state.normalize().state_string_custom(["J", "mJ", "m1", "m2"])
             if not state_mapper
             else state_mapper(state)
             .remove_small_components(tol=0.1)
@@ -83,11 +87,11 @@ class SimulationResult:
 
     def plot_state_probabilities(
         self,
-        states: List[centrex_tlf.states.State],
-        initial_state: centrex_tlf.states.State,
-        ax: plt.Axes = None,
+        states: List[centrex_tlf.states.UncoupledState],
+        initial_state: centrex_tlf.states.UncoupledState,
+        ax: Optional[plt.Axes] = None,
         position: bool = False,
-        state_mapper: Callable = None,
+        state_mapper: Optional[Callable] = None,
     ) -> None:
         """
         Plots probabilities over time for states specified in the list states.
@@ -105,8 +109,8 @@ class SimulationResult:
 
     def get_state_probability(
         self,
-        state: centrex_tlf.states.State,
-        initial_state: centrex_tlf.states.State,
+        state: centrex_tlf.states.UncoupledState,
+        initial_state: centrex_tlf.states.UncoupledState,
         ax=None,
     ):
         """
@@ -122,7 +126,7 @@ class SimulationResult:
         return self.probabilities[:, index_ini, index_state]
 
     def find_large_prob_states(
-        self, initial_state: centrex_tlf.states.State, N: int = 5
+        self, initial_state: centrex_tlf.states.CoupledState, N: int = 5
     ) -> List[centrex_tlf.states.State]:
         """
         Returns the N states with the largest mean probabilities for given initial
@@ -140,9 +144,9 @@ class SimulationResult:
 
     def plot_state_energy(
         self,
-        state: centrex_tlf.states.State,
-        zero_state: centrex_tlf.states = None,
-        ax: plt.Axes = None,
+        state: centrex_tlf.states.UncoupledState,
+        zero_state: Optional[centrex_tlf.states.UncoupledState] = None,
+        ax: Optional[plt.Axes] = None,
     ):
         """
         Plots the energy of state, using energy of zero_state as zero energy.
@@ -156,7 +160,9 @@ class SimulationResult:
             fig, ax = plt.subplots()
 
         label = (
-            state.remove_small_components(tol=0.1).normalize().make_real().__repr__()
+            state.remove_small_components(tol=0.1)
+            .normalize()
+            .state_string_custom(["J", "mJ", "m1", "m2"])
         )
         ax.plot(self.t_array / 1e-6, energies / (2 * np.pi * 1e3), label=label)
         ax.set_xlabel(r"Time / $\mu$s")
@@ -165,8 +171,8 @@ class SimulationResult:
 
     def plot_state_energies(
         self,
-        states: List[centrex_tlf.states.State],
-        zero_state: centrex_tlf.states.State,
+        states: List[centrex_tlf.states.UncoupledState],
+        zero_state: centrex_tlf.states.UncoupledState,
         ax: plt.Axes = None,
     ) -> None:
         """
@@ -180,7 +186,7 @@ class SimulationResult:
 
         return energies
 
-    def get_state_energy(self, state: centrex_tlf.states.State) -> np.ndarray:
+    def get_state_energy(self, state: centrex_tlf.states.UncoupledState) -> np.ndarray:
         """
         Gets the energy of state for all values in t_array.
         """
@@ -191,7 +197,9 @@ class SimulationResult:
 
         return self.energies[:, index_state]
 
-    def get_state_energy_diabatic(self, state: centrex_tlf.states.State) -> np.array:
+    def get_state_energy_diabatic(
+        self, state: centrex_tlf.states.UncoupledState
+    ) -> np.array:
         """
         Gets the energy of state that is closes to provided state at each time step.
 
@@ -221,13 +229,13 @@ class Simulator:
     trajectory: Trajectory
     electric_field: ElectricField
     magnetic_field: MagneticField
-    initial_states_approx: centrex_tlf.states.State
+    initial_states_approx: centrex_tlf.states.UncoupledState
     hamiltonian: Hamiltonian
     microwave_fields: List[MicrowaveField] = None
 
     def __post_init__(self):
-        self.psis = None
-        self.initial_states = None
+        self.psis = np.array([])
+        self.initial_states = []
 
     def run(
         self,
@@ -267,7 +275,12 @@ class Simulator:
                 )
                 # Background fields should always be at the same frequency as
                 # as main field so don't do the shifting for them
-                if not microwave_field.background_field:
+                # Olivier: the background field can be at a different frequency, for
+                # instance for the RC microwaves leaking through. Just check if the
+                # frequency already is present in omegas
+                if not np.any(
+                    np.isclose((2 * np.pi * microwave_field.muW_freq), omegas)
+                ):
                     omegas.append(2 * np.pi * microwave_field.muW_freq)
                     microwave_field.generate_D(self.hamiltonian.QN, omega=sum(omegas))
                     D_mu += microwave_field.D
@@ -319,13 +332,15 @@ class Simulator:
 
         # Find the eigenstates of the Hamiltonian that most closely correspond to the
         # initial states
-        self.initial_states = []
-        self.psis = []
+        initial_states = []
+        psis = []
         _, V = np.linalg.eigh(H_0)
         for state in self.initial_states_approx:
             idx = find_max_overlap_idx(state.state_vector(self.hamiltonian.QN), V)
-            self.psis.append(V[:, idx])
-            self.initial_states.append(vector_to_state(V[:, idx], self.hamiltonian.QN))
+            psis.append(V[:, idx])
+            initial_states.append(vector_to_state(V[:, idx], self.hamiltonian.QN))
+        self.psis = np.array(psis)
+        self.initial_states = initial_states
 
     def _time_evolve(self, H_slow: Callable, t_array: np.ndarray):
         """
@@ -429,17 +444,8 @@ class Simulator:
             D = D[index]
             V = V[:, index]
 
-            # Make intermediate Hamiltonian (diagonalized version of H_slow)
-            H_int = V.conj().T @ H_slow_i @ V
-
-            # Find the microwave coupling matrix in the new basis
-            H_mu = V.conj().T @ H_mu_i @ V
-
-            # Make total intermediate Hamiltonian
-            H_int = H_int + H_mu
-
-            # Shift energies of intermediate Hamiltonian so it is in rotating frame
-            H_rot = H_int + D_mu
+            # Make Hamiltonian in rotating frame
+            H_rot = V.conj().T @ (H_slow_i + H_mu_i) @ V + D_mu
 
             # Diagonalize the Hamiltonian in the rotating frame
             D_rot, V_rot, info_rot = zheevd(H_rot)
@@ -451,20 +457,22 @@ class Simulator:
             Es, evecs = D, V
             Es, evecs = reorder_evecs(evecs, Es, V_ref)
 
-            # Calculate propagator for the system
-            U_dt = (
-                V
-                @ V_rot
-                @ np.diag(np.exp(-1j * D_rot * dt))
-                @ V_rot.conj().T
-                @ V.conj().T
-            )
+            # Compute the propagator
+            # Combine the unitary matrices
+            A = V @ V_rot
 
-            for j in range(0, len(self.initial_states)):
-                self.psis[j] = U_dt @ self.psis[j]
+            # Compute the phase factors as a 1D array (no diag creation)
+            phase = np.exp(-1j * D_rot * dt)
+
+            # Multiply each column of A by the corresponding phase factor using broadcasting.
+            # A_phase is equivalent to A @ np.diag(phase)
+            A_phase = A * phase[np.newaxis, :]
+
+            # Compute U_dt without explicitly forming a diagonal matrix.
+            U_dt = A_phase @ A.conj().T
 
             # Apply propagator to each state vector
-            # self.psis = np.einsum("ij,kj->ki", U_dt, self.psis)
+            self.psis = self.psis.dot(U_dt.T)
 
             # Store results for this timestep
             psis_t[i + 1, :, :] = self.psis

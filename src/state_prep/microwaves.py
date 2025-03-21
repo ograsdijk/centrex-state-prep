@@ -136,7 +136,7 @@ class MicrowaveField:
         intensity: Intensity,
         polarization: Polarization,
         muW_freq: float,
-        QN: List[centrex_tlf.states.State],
+        QN: List[centrex_tlf.states.UncoupledBasisState],
         background_field: bool = False,
     ) -> None:
         self.Jg = Jg  # J for ground state
@@ -152,7 +152,7 @@ class MicrowaveField:
         )
 
     def get_H_t_func(
-        self, R_t: Callable, QN: List[centrex_tlf.states.State]
+        self, R_t: Callable, QN: List[centrex_tlf.states.UncoupledBasisState]
     ) -> Callable:
         """
         Returns a function that gives Hamiltonian for the microwave field as a
@@ -182,7 +182,9 @@ class MicrowaveField:
 
         return H_t
 
-    def generate_coupling_matrices(self, QN: List[centrex_tlf.states.State]) -> None:
+    def generate_coupling_matrices(
+        self, QN: List[centrex_tlf.states.UncoupledBasisState]
+    ) -> None:
         """
         Generates list of coupling Hamiltonians for x,y,z polarized microwaves
         coupling Jg to Je in basis defined by QN.

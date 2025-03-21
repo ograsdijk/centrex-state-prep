@@ -35,9 +35,9 @@ class ElectricField(StaticField):
         """
         Addition of electric fields.
         """
-        assert type(other) != ElectricField, (
-            f"Can't add {type(other)} and ElectricField"
-        )
+        assert (
+            type(other) != ElectricField
+        ), f"Can't add {type(other)} and ElectricField"
 
         E_R = lambda R: self.E_R(R) + other.E_R(R)
         return ElectricField(E_R)
@@ -96,9 +96,9 @@ class ElectricField(StaticField):
             fig, ax = plt.subplots()
 
         if not position:
-            ax.plot(t_array / 1e-6, Es[:, 0], label=r"E_x")
-            ax.plot(t_array / 1e-6, Es[:, 1], label=r"E_y")
-            ax.plot(t_array / 1e-6, Es[:, 2], label=r"E_z")
+            ax.plot(t_array / 1e-6, Es[:, 0], label=r"E$_x$")
+            ax.plot(t_array / 1e-6, Es[:, 1], label=r"E$_y$")
+            ax.plot(t_array / 1e-6, Es[:, 2], label=r"E$_z$")
             ax.set_xlabel(r"Time / $\mu$s")
             ax.set_ylabel("Electric field / V/cm")
             ax.set_title("Electric field experienced by molecule over time")
@@ -109,9 +109,9 @@ class ElectricField(StaticField):
         else:
             z_array = np.array([trajectory.R_t(t)[2] for t in t_array])
 
-            ax.plot(z_array / 1e-2, Es[:, 0], label=r"E_x")
-            ax.plot(z_array / 1e-2, Es[:, 1], label=r"E_y")
-            ax.plot(z_array / 1e-2, Es[:, 2], label=r"E_z")
+            ax.plot(z_array / 1e-2, Es[:, 0], label=r"E$_x$")
+            ax.plot(z_array / 1e-2, Es[:, 1], label=r"E$_y$")
+            ax.plot(z_array / 1e-2, Es[:, 2], label=r"E$_z$")
             ax.set_xlabel(r"Z-position / cm")
             ax.set_ylabel("Electric field / V/cm")
             ax.set_title("Electric field experienced by molecule over position")

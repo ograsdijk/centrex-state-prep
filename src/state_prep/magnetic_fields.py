@@ -63,7 +63,7 @@ class MagneticField(StaticField):
     def get_B_r(self, R: np.ndarray) -> np.ndarray:
         """
         Returns the value of the magnetic field in the xyz basis at position R in XYZ
-        coordinates.        
+        coordinates.
         """
         return self.R_to_r @ self.get_B_R(R)
 
@@ -88,9 +88,9 @@ class MagneticField(StaticField):
         if not ax:
             fig, ax = plt.subplots()
 
-        ax.plot(t_array / 1e-6, Bs[:, 0], label=r"B_x")
-        ax.plot(t_array / 1e-6, Bs[:, 1], label=r"B_y")
-        ax.plot(t_array / 1e-6, Bs[:, 2], label=r"B_z")
+        ax.plot(t_array / 1e-6, Bs[:, 0], label=r"B$_x$")
+        ax.plot(t_array / 1e-6, Bs[:, 1], label=r"B$_y$")
+        ax.plot(t_array / 1e-6, Bs[:, 2], label=r"B$_z$")
         ax.set_xlabel(r"Time / $\mu$s")
         ax.set_ylabel("Magnetic field / G")
         ax.set_title("Magnetic field experienced by molecule over time")
