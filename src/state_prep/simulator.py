@@ -264,7 +264,7 @@ class Simulator:
             # Initialize container for Hamiltonians
             muw_hams = []
 
-            # Container fro frequencies of all microwaves
+            # Container for frequencies of all microwaves
             omegas = []
 
             for microwave_field in self.microwave_fields:
@@ -283,6 +283,10 @@ class Simulator:
                 ):
                     omegas.append(2 * np.pi * microwave_field.muW_freq)
                     microwave_field.generate_D(self.hamiltonian.QN, omega=sum(omegas))
+                    if np.any((D_mu != 0) & (microwave_field.D != 0)):
+                        raise AssertionError(
+                            "Rotating frame transform failed, coupling already present between same levels."
+                        )
                     D_mu += microwave_field.D
 
             # Generate function that gives couplings due to all microwaves
