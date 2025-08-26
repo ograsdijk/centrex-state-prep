@@ -30,8 +30,10 @@ class SlowHamiltonian(Hamiltonian):
         if self.basis == "uncoupled":
             self.QN = centrex_tlf.states.generate_uncoupled_states_ground(self.Js)
             H_dict = centrex_tlf.hamiltonian.generate_uncoupled_hamiltonian_X(self.QN)
-            self.H_EB = centrex_tlf.hamiltonian.generate_uncoupled_hamiltonian_X_function(
-                H_dict
+            self.H_EB = (
+                centrex_tlf.hamiltonian.generate_uncoupled_hamiltonian_X_function(
+                    H_dict
+                )
             )
         else:
             NotImplementedError("Basis not implemented.")
@@ -73,4 +75,3 @@ class SlowHamiltonianOld(Hamiltonian):
         Returns a function that gives the slow Hamiltonian as a function of time.
         """
         return lambda t: self.H_R(self.trajectory.R_t(t))
-
