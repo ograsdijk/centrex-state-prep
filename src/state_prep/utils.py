@@ -4,6 +4,8 @@ from typing import Sequence, Tuple
 import numpy as np
 import numpy.typing as npt
 from centrex_tlf.states import (
+    CoupledBasisState,
+    CoupledState,
     State,
     UncoupledBasisState,
     UncoupledState,
@@ -11,8 +13,23 @@ from centrex_tlf.states import (
 )
 
 
-def vector_to_state(state_vector, QN, E=None):
-    state = State([])
+def vector_to_state(
+    state_vector: npt.NDArray[np.complex128],
+    QN: Sequence[CoupledBasisState | UncoupledBasisState],
+    E=None,
+) -> UncoupledState | CoupledState:
+    # Check if QN contains UncoupledBasisState or CoupledBasisState and return appropriate type
+    if len(QN) > 0:
+        if isinstance(QN[0], UncoupledBasisState):
+            state = UncoupledState([])
+        elif isinstance(QN[0], CoupledBasisState):
+            state = CoupledState([])
+        else:
+            raise ValueError(
+                "QN list must contain UncoupledBasisState or CoupledBasisState objects."
+            )
+    else:
+        raise ValueError("QN list is empty, cannot determine state type.")
 
     # Get data in correct format for initializing state object
     for j, amp in enumerate(state_vector):
@@ -21,7 +38,11 @@ def vector_to_state(state_vector, QN, E=None):
     return state
 
 
-def matrix_to_states(V, QN, E=None):
+def matrix_to_states(
+    V: npt.NDArray[np.complex128],
+    QN: Sequence[CoupledBasisState | UncoupledBasisState],
+    E=None,
+):
     # Find dimensions of matrix
     matrix_dimensions = V.shape
 
