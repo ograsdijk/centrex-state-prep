@@ -302,11 +302,11 @@ class Simulator:
 
         # Perform time-evolution
         if self.microwave_fields is None:
-            (psis_t, energies, probalities, V_ini, V_fin) = self._time_evolve(
+            (psis_t, energies, probabilities, V_ini, V_fin) = self._time_evolve(
                 H_t, t_array
             )
         else:
-            psis_t, energies, probalities, V_ini, V_fin = self._time_evolve_mu(
+            psis_t, energies, probabilities, V_ini, V_fin = self._time_evolve_mu(
                 H_t, H_mu_tot_t, D_mu, t_array
             )
 
@@ -321,7 +321,7 @@ class Simulator:
             t_array,
             psis_t,
             energies,
-            probalities,
+            probabilities,
             V_ini,
             V_fin,
         )
