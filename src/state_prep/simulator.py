@@ -58,6 +58,7 @@ class SimulationResult:
         ax: Optional[plt.Axes] = None,
         position: bool = False,
         state_mapper: Optional[Callable] = None,
+        tol: float = 1e-2,
     ) -> None:
         """
         Plots the probability of being found in a given adiabatically evolved eigenstate
@@ -68,15 +69,14 @@ class SimulationResult:
 
         probs = self.get_state_probability(state, initial_state)
 
-        label_state = state.remove_small_components(tol=0.1)
+        label_state = state.remove_small_components(tol=tol)
         label_state.data = [(amp.real, stat) for amp, stat in label_state.data]
         label = (
-            label_state.normalize().state_string_custom(["J", "mJ", "m1", "m2"])
+            label_state.normalize()
+            .remove_small_components(tol=tol)
+            .state_string_custom(["J", "mJ", "m1", "m2"])
             if not state_mapper
-            else state_mapper(state)
-            .remove_small_components(tol=0.1)
-            .normalize()
-            .__repr__()
+            else state_mapper(state.normalize().remove_small_components(tol=tol))
         )
         if position:
             ax.plot(self.z_array / 1e-2, probs, label=label)
@@ -92,6 +92,7 @@ class SimulationResult:
         ax: Optional[plt.Axes] = None,
         position: bool = False,
         state_mapper: Optional[Callable] = None,
+        tol: float = 1e-3,
     ) -> None:
         """
         Plots probabilities over time for states specified in the list states.
@@ -105,6 +106,7 @@ class SimulationResult:
                 ax=ax,
                 position=position,
                 state_mapper=state_mapper,
+                tol=tol,
             )
 
     def get_state_probability(
@@ -465,15 +467,7 @@ class Simulator:
             # Combine the unitary matrices
             A = V @ V_rot
 
-            # Compute the phase factors as a 1D array (no diag creation)
-            phase = np.exp(-1j * D_rot * dt)
-
-            # Multiply each column of A by the corresponding phase factor using broadcasting.
-            # A_phase is equivalent to A @ np.diag(phase)
-            A_phase = A * phase[np.newaxis, :]
-
-            # Compute U_dt without explicitly forming a diagonal matrix.
-            U_dt = A_phase @ A.conj().T
+            U_dt = (A * np.exp(-1j * D_rot * dt)[np.newaxis, :]) @ A.conj().T
 
             # Apply propagator to each state vector
             self.psis = self.psis.dot(U_dt.T)
