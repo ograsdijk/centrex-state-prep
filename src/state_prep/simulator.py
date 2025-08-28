@@ -128,7 +128,7 @@ class SimulationResult:
         return self.probabilities[:, index_ini, index_state]
 
     def find_large_prob_states(
-        self, initial_state: centrex_tlf.states.CoupledState, N: int = 5
+        self, initial_state: centrex_tlf.states.UncoupledState, N: int = 5
     ) -> List[centrex_tlf.states.State]:
         """
         Returns the N states with the largest mean probabilities for given initial
