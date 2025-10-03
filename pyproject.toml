@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "centrex-state-prep"       # keep your chosen dist name
+version = "0.1.0"                 # matches your current pyproject
+description = "Package for simulating coherent state preparation and evolution for centrex"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Oskari Timgren" },
+    { name = "Olivier Grasdijk" },
+]
+
+# merge of your existing dependencies + the ones from setup.py
+dependencies = [
+    "astropy>=7.1.0",
+    "ipykernel>=6.30.1",
+    "joblib>=1.5.1",
+    "matplotlib>=3.10.5",
+    "polars>=1.32.3",
+    "tqdm>=4.67.1",
+
+    # from old setup.py:
+    "numpy>=2",
+    "scipy",
+    "centrex_tlf",
+    "pandas",
+    "dill",
+]
+
+# setuptools configuration for src/ layout & package data
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
