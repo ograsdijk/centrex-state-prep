@@ -4,7 +4,9 @@ from typing import Callable, List, Tuple
 import centrex_tlf
 import numpy as np
 from centrex_tlf.constants import XConstants
-from centrex_tlf.couplings.matrix_elements import calculate_ED_ME_mixed_state
+from centrex_tlf.hamiltonian.matrix_elements_electric_dipole import (
+    generate_ED_ME_mixed_state as calculate_ED_ME_mixed_state,
+)
 from centrex_tlf.hamiltonian.wigner import threej_f
 from centrex_tlf.states import State
 from scipy import constants
@@ -423,5 +425,7 @@ def calculate_microwave_ME(state1, state2, reduced=False, pol_vec=np.array((0, 0
             prefactor += (
                 (-1) ** (p - mJ) * p_vec[-p] * threej_f(J, 1, Jprime, -mJ, -p, mJprime)
             )
+
+        return prefactor * M_r
 
         return prefactor * M_r
