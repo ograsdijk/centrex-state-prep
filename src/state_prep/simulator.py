@@ -1,8 +1,6 @@
-import pickle
-from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional
 
 import centrex_tlf
 import dill
@@ -12,7 +10,7 @@ from scipy.linalg.lapack import zheevd
 from tqdm import tqdm
 
 from .electric_fields import ElectricField
-from .hamiltonians import Hamiltonian, SlowHamiltonian
+from .hamiltonians import Hamiltonian
 from .magnetic_fields import MagneticField
 from .microwaves import MicrowaveField
 from .trajectory import Trajectory
@@ -39,13 +37,17 @@ class SimulationResult:
     magnetic_field: MagneticField
     initial_states: List[centrex_tlf.states.State]
     hamiltonian: Hamiltonian
-    microwave_fields: List[MicrowaveField]
+    microwave_fields: Optional[List[MicrowaveField]]
     t_array: np.ndarray
-    psis: np.ndarray
-    energies: np.ndarray
-    probabilities: np.ndarray
+    psis: Optional[np.ndarray]
+    energies: Optional[np.ndarray]
+    probabilities: Optional[np.ndarray]
+    probabilities_final: Optional[np.ndarray]
     V_ini: np.ndarray
     V_fin: np.ndarray
+    monitor_states: Optional[List[centrex_tlf.states.UncoupledState]] = None
+    monitor_probabilities: Optional[np.ndarray] = None
+    monitor_probabilities_final: Optional[np.ndarray] = None
 
     def __post_init__(self):
         # Generate array of positions
@@ -112,30 +114,124 @@ class SimulationResult:
     def get_state_probability(
         self,
         state: centrex_tlf.states.UncoupledState,
-        initial_state: centrex_tlf.states.UncoupledState,
+        initial_state: centrex_tlf.states.State,
         ax=None,
     ):
         """
         Returns the probability of being found in given adiabatically evolved state
         for given initial state.
         """
-        index_ini = self.initial_states.index(initial_state)
+        index_ini = self._resolve_initial_state_index(initial_state)
 
         index_state = find_max_overlap_idx(
             state.state_vector(self.hamiltonian.QN), self.V_ini
         )
 
-        return self.probabilities[:, index_ini, index_state]
+        if self.probabilities is not None:
+            return self.probabilities[:, index_ini, index_state]
+
+        if self.probabilities_final is not None:
+            # Return a 1-element array so existing code using `[-1]` keeps working.
+            return np.array([self.probabilities_final[index_ini, index_state]])
+
+        raise ValueError(
+            "No probabilities stored on this SimulationResult. "
+            "Re-run with store_probabilities=True or store_final_probabilities=True."
+        )
+
+    def _resolve_initial_state_index(
+        self, initial_state: centrex_tlf.states.State
+    ) -> int:
+        """Resolve `initial_state` to an index in `self.initial_states`.
+
+        In many workflows, users specify an *approximate* uncoupled state at t=0.
+        Internally, the simulator maps that to the closest eigenstate and stores that
+        mapped eigenstate in `self.initial_states`. This helper lets callers pass
+        either representation.
+        """
+        try:
+            return self.initial_states.index(initial_state)
+        except ValueError:
+            pass
+
+        try:
+            vec = initial_state.state_vector(self.hamiltonian.QN)
+        except Exception as e:
+            raise ValueError(
+                "initial_state not found in result.initial_states and could not compute a state vector"
+            ) from e
+
+        overlaps = []
+        for s in self.initial_states:
+            try:
+                s_vec = s.state_vector(self.hamiltonian.QN)
+            except Exception:
+                overlaps.append(-1.0)
+                continue
+            overlaps.append(float(np.abs(np.vdot(s_vec.conj(), vec)) ** 2))
+
+        best = int(np.argmax(overlaps))
+        if overlaps[best] < 0:
+            raise ValueError(
+                "Could not match initial_state to any stored initial state"
+            )
+        return best
+
+    def get_monitor_probability(
+        self,
+        monitor_state: centrex_tlf.states.UncoupledState,
+        initial_state: centrex_tlf.states.State,
+    ) -> np.ndarray:
+        """Return population of a monitored *adiabatically-tracked* state.
+
+        The monitor state is mapped to the closest eigenstate at t=0 (via V_ini),
+        and that eigenstate index is tracked through time using the library's
+        eigenvector reordering.
+        """
+        if not self.monitor_states:
+            raise ValueError(
+                "No monitor_states present on this SimulationResult. "
+                "Re-run with monitor_states=[...] and store_monitor_probabilities=True "
+                "or store_final_monitor_probabilities=True."
+            )
+
+        try:
+            mon_i = self.monitor_states.index(monitor_state)
+        except ValueError as e:
+            raise ValueError("monitor_state not found in result.monitor_states") from e
+
+        index_ini = self._resolve_initial_state_index(initial_state)
+
+        if self.monitor_probabilities is not None:
+            return self.monitor_probabilities[:, index_ini, mon_i]
+
+        if self.monitor_probabilities_final is not None:
+            return np.array([self.monitor_probabilities_final[index_ini, mon_i]])
+
+        raise ValueError(
+            "No monitor probabilities stored on this SimulationResult. "
+            "Re-run with store_monitor_probabilities=True or store_final_monitor_probabilities=True."
+        )
 
     def find_large_prob_states(
-        self, initial_state: centrex_tlf.states.UncoupledState, N: int = 5
+        self, initial_state: centrex_tlf.states.State, N: int = 5
     ) -> List[centrex_tlf.states.State]:
         """
         Returns the N states with the largest mean probabilities for given initial
         state.
         """
-        index_ini = self.initial_states.index(initial_state)
-        index = np.argsort(-np.mean(self.probabilities[:, index_ini, :], axis=0))[:N]
+        index_ini = self._resolve_initial_state_index(initial_state)
+        if self.probabilities is not None:
+            score = np.mean(self.probabilities[:, index_ini, :], axis=0)
+        elif self.probabilities_final is not None:
+            score = self.probabilities_final[index_ini, :]
+        else:
+            raise ValueError(
+                "No probabilities stored on this SimulationResult. "
+                "Re-run with store_probabilities=True or store_final_probabilities=True."
+            )
+
+        index = np.argsort(-score)[:N]
 
         state_vecs = self.V_ini[:, index]
         states = []
@@ -193,6 +289,11 @@ class SimulationResult:
         Gets the energy of state for all values in t_array.
         """
 
+        if self.energies is None:
+            raise ValueError(
+                "No energies stored on this SimulationResult. Re-run with store_energies=True."
+            )
+
         index_state = find_max_overlap_idx(
             state.state_vector(self.hamiltonian.QN), self.V_ini
         )
@@ -207,12 +308,9 @@ class SimulationResult:
 
         Corresponds (somewhat) to diabatic following of eigenstates
         """
-
-        index_state = find_max_overlap_idx(
-            state.state_vector(self.hamiltonian.QN), self.V_ini
+        raise NotImplementedError(
+            "Diabatic energies are not stored on SimulationResult in this version."
         )
-
-        return self.energies_diabatic[:, index_state]
 
     def save_to_pickle(self, path: Path) -> None:
         """
@@ -220,6 +318,29 @@ class SimulationResult:
         """
         with open(path, "wb+") as f:
             dill.dump(self, f)
+
+
+@dataclass
+class MicrowaveScanResult:
+    """Result from a microwave-parameter scan with shared slow Hamiltonian.
+
+    This is intended for ensemble scans where the slow Hamiltonian H_slow(t)
+    is identical for all scan points, and only microwave terms differ (detuning,
+    power, background fields, etc.).
+    """
+
+    trajectory: Trajectory
+    electric_field: ElectricField
+    magnetic_field: MagneticField
+    initial_states: List[centrex_tlf.states.State]
+    hamiltonian: Hamiltonian
+    t_array: np.ndarray
+    psis_final: np.ndarray
+    probabilities_final: Optional[np.ndarray]
+    monitor_states: Optional[List[centrex_tlf.states.UncoupledState]] = None
+    monitor_probabilities_final: Optional[np.ndarray] = None
+    V_ini: Optional[np.ndarray] = None
+    V_fin: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -233,7 +354,7 @@ class Simulator:
     magnetic_field: MagneticField
     initial_states_approx: centrex_tlf.states.UncoupledState
     hamiltonian: Hamiltonian
-    microwave_fields: List[MicrowaveField] = None
+    microwave_fields: Optional[List[MicrowaveField]] = None
 
     def __post_init__(self):
         self.psis = np.array([])
@@ -242,18 +363,47 @@ class Simulator:
     def run(
         self,
         N_steps=int(1e4),
+        store_every: int = 1,
+        store_psis: bool = True,
+        store_energies: bool = True,
+        store_probabilities: bool = True,
+        store_final_probabilities: bool = True,
+        progress: bool = True,
+        monitor_states: Optional[List[centrex_tlf.states.UncoupledState]] = None,
+        store_monitor_probabilities: bool = False,
+        store_final_monitor_probabilities: bool = True,
+        eig_backend: str = "zheevd",
     ):
         """
         Runs the simulation.
+
+        Parameters
+        ----------
+        N_steps:
+            Number of integration timesteps.
+        store_every:
+            Store results every N steps (1 = store all). Increasing this can
+            significantly speed up simulations by reducing allocations and
+            probability calculations.
+        monitor_states:
+            Optional list of states to monitor *as adiabatically-tracked eigenstates*.
+            Each state is mapped to the closest eigenstate at t=0 (using max overlap
+            with V_ini), and then that eigenstate index is tracked through time via the
+            same eigenvector reordering used everywhere else.
+        store_monitor_probabilities:
+            If True, store populations for monitor_states at each stored time.
+        store_final_monitor_probabilities:
+            If True, store only the final populations for monitor_states.
+
+        eig_backend:
+            Eigen-solver backend used for diagonalizations.
+            - "zheevd": use LAPACK zheevd (current default)
+            - "numpy": use numpy.linalg.eigh
         """
+        if store_every < 1:
+            raise ValueError("store_every must be >= 1")
         # Calculate the total time for the simulation
         T = self.trajectory.get_T()
-
-        # Make a function of electric field over time
-        E_t = self.electric_field.get_E_t_func(self.trajectory.R_t)
-
-        # Function of B-field over time
-        B_t = self.magnetic_field.get_B_t_func(self.trajectory.R_t)
 
         # Generate Hamiltonian that has slow time-evolution included
         H_t = self.hamiltonian.get_H_t_func()
@@ -299,38 +449,93 @@ class Simulator:
                         H_mu_tot = H_mu_tot + H_mu_t(t)
                 return H_mu_tot
 
-        # Generate time array
+        # Generate integration time array
         t_array = np.linspace(0, T, N_steps)
+
+        # Indices to store output (downsampled)
+        save_idx = np.arange(0, N_steps, store_every, dtype=int)
+        if save_idx.size == 0 or save_idx[0] != 0:
+            save_idx = np.insert(save_idx, 0, 0)
+        if save_idx[-1] != N_steps - 1:
+            save_idx = np.append(save_idx, N_steps - 1)
 
         # Perform time-evolution
         if self.microwave_fields is None:
-            (psis_t, energies, probabilities, V_ini, V_fin) = self._time_evolve(
-                H_t, t_array
+            (
+                psis_t,
+                energies,
+                probabilities,
+                probabilities_final,
+                monitor_probabilities,
+                monitor_probabilities_final,
+                V_ini,
+                V_fin,
+            ) = self._time_evolve(
+                H_t,
+                t_array,
+                save_idx,
+                store_psis=store_psis,
+                store_energies=store_energies,
+                store_probabilities=store_probabilities,
+                store_final_probabilities=store_final_probabilities,
+                progress=progress,
+                monitor_states=monitor_states,
+                store_monitor_probabilities=store_monitor_probabilities,
+                store_final_monitor_probabilities=store_final_monitor_probabilities,
+                eig_backend=eig_backend,
             )
         else:
-            psis_t, energies, probabilities, V_ini, V_fin = self._time_evolve_mu(
-                H_t, H_mu_tot_t, D_mu, t_array
+            (
+                psis_t,
+                energies,
+                probabilities,
+                probabilities_final,
+                monitor_probabilities,
+                monitor_probabilities_final,
+                V_ini,
+                V_fin,
+            ) = self._time_evolve_mu(
+                H_t,
+                H_mu_tot_t,
+                D_mu,
+                t_array,
+                save_idx,
+                store_psis=store_psis,
+                store_energies=store_energies,
+                store_probabilities=store_probabilities,
+                store_final_probabilities=store_final_probabilities,
+                progress=progress,
+                monitor_states=monitor_states,
+                store_monitor_probabilities=store_monitor_probabilities,
+                store_final_monitor_probabilities=store_final_monitor_probabilities,
+                eig_backend=eig_backend,
             )
 
         # Generate a result object
         result = SimulationResult(
-            self.trajectory,
-            self.electric_field,
-            self.magnetic_field,
-            self.initial_states,
-            self.hamiltonian,
-            self.microwave_fields,
-            t_array,
-            psis_t,
-            energies,
-            probabilities,
-            V_ini,
-            V_fin,
+            trajectory=self.trajectory,
+            electric_field=self.electric_field,
+            magnetic_field=self.magnetic_field,
+            initial_states=self.initial_states,
+            hamiltonian=self.hamiltonian,
+            microwave_fields=self.microwave_fields,
+            t_array=t_array[save_idx],
+            psis=psis_t,
+            energies=energies,
+            probabilities=probabilities,
+            probabilities_final=probabilities_final,
+            monitor_states=monitor_states,
+            monitor_probabilities=monitor_probabilities,
+            monitor_probabilities_final=monitor_probabilities_final,
+            V_ini=V_ini,
+            V_fin=V_fin,
         )
 
         return result
 
-    def init_state_vecs(self, H_0) -> None:
+    def init_state_vecs(
+        self, H_0: np.ndarray, V_0: Optional[np.ndarray] = None
+    ) -> None:
         """
         Generates state vectors based on self.initial_states in the basis
         of self.hamiltonian
@@ -340,7 +545,9 @@ class Simulator:
         # initial states
         initial_states = []
         psis = []
-        _, V = np.linalg.eigh(H_0)
+        V = V_0
+        if V is None:
+            _, V = np.linalg.eigh(H_0)
         for state in self.initial_states_approx:
             idx = find_max_overlap_idx(state.state_vector(self.hamiltonian.QN), V)
             psis.append(V[:, idx])
@@ -348,28 +555,372 @@ class Simulator:
         self.psis = np.array(psis)
         self.initial_states = initial_states
 
-    def _time_evolve(self, H_slow: Callable, t_array: np.ndarray):
+    def run_microwave_scan(
+        self,
+        *,
+        detunings_hz: np.ndarray,
+        intensity_prefactors: np.ndarray,
+        N_steps: int = int(1e4),
+        monitor_states: Optional[List[centrex_tlf.states.UncoupledState]] = None,
+        store_final_probabilities: bool = True,
+        store_final_monitor_probabilities: bool = True,
+        progress: bool = True,
+        eig_backend: str = "zheevd",
+    ) -> MicrowaveScanResult:
+        """Run a batched microwave scan reusing the slow diagonalization.
+
+        This is optimized for scans where the *slow* Hamiltonian H_slow(t) is
+        identical across scan points, and only microwave parameters vary.
+
+        Microwave coupling shapes are taken from `self.microwave_fields` (same as
+        `run()`), but you supply per-scan-point prefactors:
+
+        - `detunings_hz`: detuning(s) in Hz, same shape as `intensity_prefactors`.
+        - `intensity_prefactors`: dimensionless scaling of *intensity/power*.
+          Internally, couplings scale as sqrt(intensity_prefactors).
+
+        Shapes:
+        - For M microwave fields, provide arrays shaped (B, M) for batch size B.
+        - For M=1, 1D arrays of shape (B,) or scalars are accepted.
+        - 1D arrays of shape (M,) imply B=1.
+        """
+        if N_steps < 2:
+            raise ValueError("N_steps must be >= 2")
+
+        if not self.microwave_fields:
+            raise ValueError(
+                "run_microwave_scan requires Simulator.microwave_fields (a list of MicrowaveField)."
+            )
+
+        n_fields = len(self.microwave_fields)
+
+        def _as_batched(x: np.ndarray, name: str) -> np.ndarray:
+            arr = np.asarray(x)
+            if arr.ndim == 0:
+                if n_fields != 1:
+                    raise ValueError(f"{name} is scalar but there are {n_fields} microwave fields")
+                return arr.reshape(1, 1)
+            if arr.ndim == 1:
+                if n_fields == 1:
+                    return arr.reshape(-1, 1)
+                if arr.shape[0] != n_fields:
+                    raise ValueError(
+                        f"{name} must have shape (B,{n_fields}) or ({n_fields},); got {arr.shape}"
+                    )
+                return arr.reshape(1, n_fields)
+            if arr.ndim == 2:
+                if arr.shape[1] != n_fields:
+                    raise ValueError(
+                        f"{name} must have shape (B,{n_fields}); got {arr.shape}"
+                    )
+                return arr
+            raise ValueError(f"{name} must be scalar, 1D, or 2D; got ndim={arr.ndim}")
+
+        det_b = _as_batched(detunings_hz, "detunings_hz").astype(float, copy=False)
+        inten_b = _as_batched(intensity_prefactors, "intensity_prefactors").astype(
+            float, copy=False
+        )
+        if det_b.shape != inten_b.shape:
+            raise ValueError(
+                f"detunings_hz and intensity_prefactors must have identical shapes; got {det_b.shape} vs {inten_b.shape}"
+            )
+
+        if np.any(inten_b < 0):
+            raise ValueError("intensity_prefactors must be >= 0")
+
+        batch = int(det_b.shape[0])
+
+        # Build per-microwave H_mu(t) functions (shared across batch)
+        muw_hams = [
+            mw.get_H_t_func(self.trajectory.R_t, self.hamiltonian.QN)
+            for mw in self.microwave_fields
+        ]
+
+        # Build base rotating-frame shift D_mu (deduplicated by *frequency*), like `run()`.
+        # For per-field detunings, we require that fields with the same frequency
+        # share the same detuning across the batch (otherwise the rotating-frame
+        # definition would be ambiguous).
+        D_mu_base = np.zeros((len(self.hamiltonian.QN), len(self.hamiltonian.QN)))
+        unique_omegas: List[float] = []
+        group_masks: List[np.ndarray] = []
+        group_field_indices: List[List[int]] = []
+        for field_i, mw in enumerate(self.microwave_fields):
+            omega = 2 * np.pi * mw.muW_freq
+            group = None
+            for gi, om in enumerate(unique_omegas):
+                if np.isclose(omega, om):
+                    group = gi
+                    break
+
+            if group is None:
+                unique_omegas.append(omega)
+                omega_sum = float(np.sum(unique_omegas))
+                mw.generate_D(self.hamiltonian.QN, omega=omega_sum)
+                D_mu_base += mw.D
+                group_masks.append((np.abs(mw.D) > 0).astype(float))
+                group_field_indices.append([field_i])
+                group = len(unique_omegas) - 1
+            else:
+                group_field_indices[group].append(field_i)
+
+        # Validate per-field detunings within each frequency group, then build D_mu_batch
+        detuning_groups = np.zeros((batch, len(unique_omegas)), dtype=float)
+        for gi, idxs in enumerate(group_field_indices):
+            base = det_b[:, idxs[0]]
+            for j in idxs[1:]:
+                if not np.allclose(det_b[:, j], base):
+                    raise ValueError(
+                        "Microwave fields with the same muW_freq must share the same detuning in detunings_hz. "
+                        f"Frequency group {gi} has indices {idxs} with differing detunings."
+                    )
+            detuning_groups[:, gi] = base
+
+        D_mu_batch = np.repeat(D_mu_base[None, :, :], batch, axis=0)
+        for gi, mask in enumerate(group_masks):
+            D_mu_batch -= (2 * np.pi) * detuning_groups[:, gi, None, None] * mask[
+                None, :, :
+            ]
+
+        # Coupling scaling: intensity/power prefactor -> E-field prefactor via sqrt
+        coupling_scales = np.sqrt(inten_b)
+
+        def H_mu_batch_t(t: float) -> np.ndarray:
+            n = len(self.hamiltonian.QN)
+            out = np.zeros((batch, n, n), dtype=complex)
+            for j, H_mu_t in enumerate(muw_hams):
+                Hj = H_mu_t(t)
+                out += coupling_scales[:, j, None, None] * Hj[None, :, :]
+            return out
+
+        H_t = self.hamiltonian.get_H_t_func()
+        T = self.trajectory.get_T()
+        t_array = np.linspace(0, T, N_steps)
+
+        (
+            psis_final,
+            probabilities_final,
+            monitor_probabilities_final,
+            V_ini,
+            V_fin,
+        ) = self._time_evolve_mu_batched_shared_slow(
+            H_slow_t=H_t,
+            H_mu_batch_t=H_mu_batch_t,
+            D_mu_batch=D_mu_batch,
+            t_array=t_array,
+            monitor_states=monitor_states,
+            store_final_probabilities=store_final_probabilities,
+            store_final_monitor_probabilities=store_final_monitor_probabilities,
+            progress=progress,
+            eig_backend=eig_backend,
+        )
+
+        return MicrowaveScanResult(
+            trajectory=self.trajectory,
+            electric_field=self.electric_field,
+            magnetic_field=self.magnetic_field,
+            initial_states=self.initial_states,
+            hamiltonian=self.hamiltonian,
+            t_array=t_array,
+            psis_final=psis_final,
+            probabilities_final=probabilities_final,
+            monitor_states=monitor_states,
+            monitor_probabilities_final=monitor_probabilities_final,
+            V_ini=V_ini,
+            V_fin=V_fin,
+        )
+
+    def _time_evolve_mu_batched_shared_slow(
+        self,
+        *,
+        H_slow_t: Callable[[float], np.ndarray],
+        H_mu_batch_t: Callable[[float], np.ndarray],
+        D_mu_batch: np.ndarray,
+        t_array: np.ndarray,
+        monitor_states: Optional[List[centrex_tlf.states.UncoupledState]],
+        store_final_probabilities: bool,
+        store_final_monitor_probabilities: bool,
+        progress: bool,
+        eig_backend: str,
+    ):
+        """Batched microwave evolution with shared slow diagonalization.
+
+        This is a CPU-only batched variant of `_time_evolve_mu` where H_slow(t)
+        is identical across the batch and is diagonalized only once per timestep.
+        """
+        # Validate D_mu_batch and infer batch size
+        if D_mu_batch.ndim == 2:
+            batch = 1
+            D_mu_b = D_mu_batch[None, :, :]
+        elif D_mu_batch.ndim == 3:
+            batch = D_mu_batch.shape[0]
+            D_mu_b = D_mu_batch
+        else:
+            raise ValueError("D_mu_batch must have shape (n,n) or (B,n,n)")
+
+        # Calculate Hamiltonian at tini
+        H_tini = H_slow_t(t_array[0])
+
+        # Reference eigen-decomposition at t0 (reused for init + tracking)
+        E_ref, V_ref = np.linalg.eigh(H_tini)
+        index = np.argsort(E_ref)
+        E_ref = E_ref[index]
+        V_ref = V_ref[:, index]
+        V_ref_ini = V_ref
+
+        monitor_idx: Optional[np.ndarray] = None
+        if monitor_states:
+            monitor_idx = np.array(
+                [
+                    find_max_overlap_idx(s.state_vector(self.hamiltonian.QN), V_ref_ini)
+                    for s in monitor_states
+                ],
+                dtype=int,
+            )
+
+        # Initialize state vectors once, then replicate across batch
+        self.init_state_vecs(H_tini, V_0=V_ref)
+        psis_batch = np.repeat(self.psis[None, :, :], batch, axis=0)
+
+        last_evecs = V_ref
+        for i, t in enumerate(tqdm(t_array[:-1], disable=not progress)):
+            dt = t_array[i + 1] - t_array[i]
+
+            # Shared slow Hamiltonian diagonalization (once per timestep)
+            H_slow_i = H_slow_t(t)
+            if eig_backend == "zheevd":
+                D, V, info = zheevd(H_slow_i)
+                if info != 0:
+                    D, V = np.linalg.eigh(H_slow_i)
+            elif eig_backend == "numpy":
+                D, V = np.linalg.eigh(H_slow_i)
+            else:
+                raise ValueError("Unknown eig_backend. Expected 'zheevd' or 'numpy'.")
+
+            # Track eigenvectors (for probabilities/monitor semantics)
+            Es, evecs = D, V
+            Es, evecs = reorder_evecs(evecs, Es, V_ref)
+            last_evecs = evecs
+
+            # Batch-specific microwave terms
+            H_mu_b = H_mu_batch_t(t)
+            if H_mu_b.ndim != 3 or H_mu_b.shape[1:] != (V.shape[0], V.shape[0]):
+                raise ValueError("H_mu_batch_t(t) must return an array of shape (B,n,n)")
+            if H_mu_b.shape[0] != batch:
+                raise ValueError(
+                    f"H_mu_batch_t(t) returned batch={H_mu_b.shape[0]} but D_mu_batch has batch={batch}"
+                )
+
+            Vh = V.conj().T
+            diag_idx = slice(None, None, V.shape[0] + 1)
+
+            for b in range(batch):
+                # Rotate microwave Hamiltonian into slow-eigenbasis and add detunings
+                tmp = H_mu_b[b] @ V
+                H_rot = Vh @ tmp
+                H_rot = H_rot + D_mu_b[b]
+                H_rot.flat[diag_idx] += D
+
+                # Diagonalize rotating-frame Hamiltonian (per scan point)
+                if eig_backend == "zheevd":
+                    D_rot, V_rot, info_rot = zheevd(H_rot)
+                    if info_rot != 0:
+                        D_rot, V_rot = np.linalg.eigh(H_rot)
+                elif eig_backend == "numpy":
+                    D_rot, V_rot = np.linalg.eigh(H_rot)
+                else:
+                    raise ValueError("Unknown eig_backend. Expected 'zheevd' or 'numpy'.")
+
+                A = V @ V_rot
+
+                phases_rot = np.exp(-1j * D_rot * dt)
+                tmp2 = psis_batch[b] @ A.conj()
+                tmp2 *= phases_rot[np.newaxis, :]
+                psis_batch[b] = tmp2 @ A.T
+
+            # Update reference for eigenvector tracking (shared)
+            V_ref = evecs
+
+        probabilities_final = None
+        if store_final_probabilities:
+            overlaps = psis_batch @ last_evecs.conj()
+            probabilities_final = np.abs(overlaps) ** 2
+
+        monitor_probabilities_final = None
+        if store_final_monitor_probabilities and (monitor_idx is not None):
+            amps = psis_batch @ last_evecs[:, monitor_idx].conj()
+            monitor_probabilities_final = np.abs(amps) ** 2
+
+        return psis_batch, probabilities_final, monitor_probabilities_final, V_ref_ini, V_ref
+
+    def _time_evolve(
+        self,
+        H_slow: Callable,
+        t_array: np.ndarray,
+        save_idx: Optional[np.ndarray],
+        *,
+        store_psis: bool,
+        store_energies: bool,
+        store_probabilities: bool,
+        store_final_probabilities: bool,
+        progress: bool,
+        monitor_states: Optional[List[centrex_tlf.states.UncoupledState]],
+        store_monitor_probabilities: bool,
+        store_final_monitor_probabilities: bool,
+        eig_backend: str,
+    ):
         """
         Time evolves the system using the Hamiltonian function H_t
         over the time period in t_array.
         """
+        if save_idx is None:
+            save_idx = np.arange(len(t_array), dtype=int)
+
         # Calculate Hamiltonian at tini
         H_tini = H_slow(t_array[0])
 
-        # Initialize state vectors
-        self.init_state_vecs(H_tini)
-
-        # Initialize containers to store results
-        psis_t, energies, probabilities = self._init_results_containers(t_array, H_tini)
-        energies_diabatic = energies.copy()
-
-        # Initialize reference matrix of eigenvectors that is used to keep track
-        # of adiabatic evolution of eigenstates
+        # Reference eigen-decomposition at t0 (reused for init + storage)
         E_ref, V_ref = np.linalg.eigh(H_tini)
         V_ref_ini = V_ref
 
+        monitor_idx: Optional[np.ndarray] = None
+        if monitor_states:
+            monitor_idx = np.array(
+                [
+                    find_max_overlap_idx(s.state_vector(self.hamiltonian.QN), V_ref_ini)
+                    for s in monitor_states
+                ],
+                dtype=int,
+            )
+
+        # Initialize state vectors
+        self.init_state_vecs(H_tini, V_0=V_ref)
+
+        # Initialize containers to store results (possibly downsampled)
+        psis_t, energies, probabilities = self._init_results_containers(
+            t_array[save_idx],
+            H_tini,
+            store_psis=store_psis,
+            store_energies=store_energies,
+            store_probabilities=store_probabilities,
+            D_0=E_ref,
+            V_0=V_ref,
+        )
+
+        # Initialize reference matrix of eigenvectors that is used to keep track
+        # of adiabatic evolution of eigenstates
+
         # Loop over t_array to time-evolve
-        for i, t in enumerate(tqdm(t_array[:-1])):
+        monitor_probabilities = None
+        if store_monitor_probabilities and (monitor_idx is not None):
+            monitor_probabilities = np.zeros(
+                (len(save_idx), len(self.initial_states), monitor_idx.size)
+            )
+            amps0 = self.psis @ V_ref_ini[:, monitor_idx].conj()
+            monitor_probabilities[0, :, :] = np.abs(amps0) ** 2
+
+        out_i = 0
+        last_evecs = V_ref
+        for i, t in enumerate(tqdm(t_array[:-1], disable=not progress)):
             # Calculate the timestep
             dt = t_array[i + 1] - t_array[i]
 
@@ -377,30 +928,66 @@ class Simulator:
             H_slow_i = H_slow(t)
 
             # Diagonalize Hamiltonian
-            D, V, info = zheevd(H_slow_i)
-            if info != 0:
+            if eig_backend == "zheevd":
+                D, V, info = zheevd(H_slow_i)
+                if info != 0:
+                    D, V = np.linalg.eigh(H_slow_i)
+            elif eig_backend == "numpy":
                 D, V = np.linalg.eigh(H_slow_i)
+            else:
+                raise ValueError("Unknown eig_backend. Expected 'zheevd' or 'numpy'.")
 
             # Reorder eigenvectors and energies
             Es, evecs = reorder_evecs(V, D, V_ref)
-            Es_diabatic, _ = reorder_evecs(V, D, V_ref_ini)
+            # Es_diabatic, _ = reorder_evecs(V, D, V_ref_ini)
+            last_evecs = evecs
 
-            # Calculate propagator for the system
-            U_dt = V @ np.diag(np.exp(-1j * D * dt)) @ V.conj().T
+            # Apply propagator without forming U_dt:
+            # For row-vector storage (each state is a row), the update is
+            # psi <- psi @ V.conj() @ diag(exp(-i D dt)) @ V.T
+            phases = np.exp(-1j * D * dt)
+            tmp = self.psis @ V.conj()
+            tmp *= phases[np.newaxis, :]
+            self.psis = tmp @ V.T
 
-            # Apply propagator to each state vector
-            self.psis = np.einsum("ij,kj->ki", U_dt, self.psis)
+            # Store results for this timestep if requested
+            if (i + 1) == save_idx[out_i + 1]:
+                out_i += 1
+                if store_psis and psis_t is not None:
+                    psis_t[out_i, :, :] = self.psis
+                if store_energies and energies is not None:
+                    energies[out_i, :] = Es
+                if store_probabilities and probabilities is not None:
+                    probabilities[out_i, :, :] = self.calculate_probabilities(
+                        self.psis, evecs
+                    )
 
-            # Store results for this timestep
-            psis_t[i + 1, :, :] = self.psis
-            energies[i + 1, :] = Es
-            energies_diabatic[i + 1, :] = Es_diabatic
-            probabilities[i + 1, :, :] = self.calculate_probabilities(self.psis, evecs)
+                if monitor_probabilities is not None:
+                    amps = self.psis @ evecs[:, monitor_idx].conj()
+                    monitor_probabilities[out_i, :, :] = np.abs(amps) ** 2
 
             # Change V_ref
             V_ref = evecs
 
-        return psis_t, energies, probabilities, V_ref_ini, V_ref
+        monitor_probabilities_final = None
+        if store_final_monitor_probabilities and (monitor_idx is not None):
+            amps = self.psis @ last_evecs[:, monitor_idx].conj()
+            monitor_probabilities_final = np.abs(amps) ** 2
+
+        probabilities_final = None
+        if store_final_probabilities:
+            probabilities_final = self.calculate_probabilities(self.psis, last_evecs)
+
+        return (
+            psis_t,
+            energies,
+            probabilities,
+            probabilities_final,
+            monitor_probabilities,
+            monitor_probabilities_final,
+            V_ref_ini,
+            V_ref,
+        )
 
     def _time_evolve_mu(
         self,
@@ -408,30 +995,74 @@ class Simulator:
         H_mu_t: Callable,
         D_mu: np.ndarray,
         t_array: np.ndarray,
+        save_idx: Optional[np.ndarray],
+        *,
+        store_psis: bool,
+        store_energies: bool,
+        store_probabilities: bool,
+        store_final_probabilities: bool,
+        progress: bool,
+        monitor_states: Optional[List[centrex_tlf.states.UncoupledState]],
+        store_monitor_probabilities: bool,
+        store_final_monitor_probabilities: bool,
+        eig_backend: str,
     ):
         """
         Time evolves the system using the Hamiltonian function H_t
         over the time period in t_array.
         """
+        if save_idx is None:
+            save_idx = np.arange(len(t_array), dtype=int)
+
         # Calculate Hamiltonian at tini
         H_tini = H_slow_t(t_array[0])
 
-        # Initialize state vectors
-        self.init_state_vecs(H_tini)
-
-        # Initialize containers to store results
-        psis_t, energies, probabilities = self._init_results_containers(t_array, H_tini)
-
-        # Initialize reference matrix of eigenvectors that is used to keep track
-        # of adiabatic evolution of eigenstates
+        # Reference eigen-decomposition at t0 (reused for init + storage)
         E_ref, V_ref = np.linalg.eigh(H_tini)
         index = np.argsort(E_ref)
         E_ref = E_ref[index]
         V_ref = V_ref[:, index]
         V_ref_ini = V_ref
 
+        monitor_idx: Optional[np.ndarray] = None
+        if monitor_states:
+            monitor_idx = np.array(
+                [
+                    find_max_overlap_idx(s.state_vector(self.hamiltonian.QN), V_ref_ini)
+                    for s in monitor_states
+                ],
+                dtype=int,
+            )
+
+        # Initialize state vectors
+        self.init_state_vecs(H_tini, V_0=V_ref)
+
+        # Initialize containers to store results (possibly downsampled)
+        psis_t, energies, probabilities = self._init_results_containers(
+            t_array[save_idx],
+            H_tini,
+            store_psis=store_psis,
+            store_energies=store_energies,
+            store_probabilities=store_probabilities,
+            D_0=E_ref,
+            V_0=V_ref,
+        )
+
+        # Initialize reference matrix of eigenvectors that is used to keep track
+        # of adiabatic evolution of eigenstates
+
         # Loop over t_array to time-evolve
-        for i, t in enumerate(tqdm(t_array[:-1])):
+        monitor_probabilities = None
+        if store_monitor_probabilities and (monitor_idx is not None):
+            monitor_probabilities = np.zeros(
+                (len(save_idx), len(self.initial_states), monitor_idx.size)
+            )
+            amps0 = self.psis @ V_ref_ini[:, monitor_idx].conj()
+            monitor_probabilities[0, :, :] = np.abs(amps0) ** 2
+
+        out_i = 0
+        last_evecs = V_ref
+        for i, t in enumerate(tqdm(t_array[:-1], disable=not progress)):
             # Calculate the timestep
             dt = t_array[i + 1] - t_array[i]
 
@@ -441,71 +1072,136 @@ class Simulator:
 
             # Diagonalize slow Hamiltonian and transfer to basis where it is
             # diagonal
-            D, V, info = zheevd(H_slow_i)
-            if info != 0:
+            if eig_backend == "zheevd":
+                D, V, info = zheevd(H_slow_i)
+                if info != 0:
+                    D, V = np.linalg.eigh(H_slow_i)
+            elif eig_backend == "numpy":
                 D, V = np.linalg.eigh(H_slow_i)
+            else:
+                raise ValueError("Unknown eig_backend. Expected 'zheevd' or 'numpy'.")
 
             # Sort the eigenvalues so they are in ascending order
-            index = np.argsort(D)
-            D = D[index]
-            V = V[:, index]
+            # index = np.argsort(D)
+            # D = D[index]
+            # V = V[:, index]
 
-            # Make Hamiltonian in rotating frame
-            H_rot = V.conj().T @ (H_slow_i + H_mu_i) @ V + D_mu
+            # Build rotating-frame Hamiltonian in the slow-eigenbasis.
+            # Since V diagonalizes H_slow_i, we have V^H H_slow_i V = diag(D),
+            # so we only need to rotate the microwave part.
+            H_rot = V.conj().T @ H_mu_i @ V
+            H_rot = H_rot + D_mu
+            H_rot[np.diag_indices_from(H_rot)] += D
 
             # Diagonalize the Hamiltonian in the rotating frame
-            D_rot, V_rot, info_rot = zheevd(H_rot)
-            if info_rot != 0:
-                print("zheevd didn't work for H_rot")
+            if eig_backend == "zheevd":
+                D_rot, V_rot, info_rot = zheevd(H_rot)
+                if info_rot != 0:
+                    D_rot, V_rot = np.linalg.eigh(H_rot)
+            elif eig_backend == "numpy":
                 D_rot, V_rot = np.linalg.eigh(H_rot)
+            else:
+                raise ValueError("Unknown eig_backend. Expected 'zheevd' or 'numpy'.")
 
             # Reorder eigenvectors and energies
             Es, evecs = D, V
             Es, evecs = reorder_evecs(evecs, Es, V_ref)
+            last_evecs = evecs
 
             # Compute the propagator
             # Combine the unitary matrices
             A = V @ V_rot
 
-            U_dt = (A * np.exp(-1j * D_rot * dt)[np.newaxis, :]) @ A.conj().T
+            # Apply propagator without forming U_dt (same trick as above)
+            phases_rot = np.exp(-1j * D_rot * dt)
+            tmp = self.psis @ A.conj()
+            tmp *= phases_rot[np.newaxis, :]
+            self.psis = tmp @ A.T
 
-            # Apply propagator to each state vector
-            self.psis = self.psis.dot(U_dt.T)
+            # Store results for this timestep if requested
+            if (i + 1) == save_idx[out_i + 1]:
+                out_i += 1
+                if store_psis and psis_t is not None:
+                    psis_t[out_i, :, :] = self.psis
+                if store_energies and energies is not None:
+                    energies[out_i, :] = Es
+                if store_probabilities and probabilities is not None:
+                    probabilities[out_i, :, :] = self.calculate_probabilities(
+                        self.psis, evecs
+                    )
 
-            # Store results for this timestep
-            psis_t[i + 1, :, :] = self.psis
-            energies[i + 1, :] = Es
-            probabilities[i + 1, :, :] = self.calculate_probabilities(self.psis, evecs)
+                if monitor_probabilities is not None:
+                    amps = self.psis @ evecs[:, monitor_idx].conj()
+                    monitor_probabilities[out_i, :, :] = np.abs(amps) ** 2
 
             # Change V_ref
             V_ref = evecs
 
-        return psis_t, energies, probabilities, V_ref_ini, V_ref
+        probabilities_final = None
+        if store_final_probabilities:
+            probabilities_final = self.calculate_probabilities(self.psis, last_evecs)
 
-    def _init_results_containers(self, t_array: np.ndarray, H_tini: np.ndarray):
+        monitor_probabilities_final = None
+        if store_final_monitor_probabilities and (monitor_idx is not None):
+            amps = self.psis @ last_evecs[:, monitor_idx].conj()
+            monitor_probabilities_final = np.abs(amps) ** 2
+
+        return (
+            psis_t,
+            energies,
+            probabilities,
+            probabilities_final,
+            monitor_probabilities,
+            monitor_probabilities_final,
+            V_ref_ini,
+            V_ref,
+        )
+
+    def _init_results_containers(
+        self,
+        t_array: np.ndarray,
+        H_tini: np.ndarray,
+        *,
+        store_psis: bool,
+        store_energies: bool,
+        store_probabilities: bool,
+        D_0: Optional[np.ndarray] = None,
+        V_0: Optional[np.ndarray] = None,
+    ):
         """
         Initializes containers for time evolution results based on array of times
         and Hamiltonian at initial time.
         """
-        # Storage for state vectors
-        psis_t = np.zeros(
-            (len(t_array), len(self.initial_states), len(self.hamiltonian.QN)),
-            dtype="complex",
-        )
-        psis_t[0, :, :] = self.psis
+        psis_t: Optional[np.ndarray] = None
+        energies: Optional[np.ndarray] = None
+        probabilities: Optional[np.ndarray] = None
 
-        # Storage for energies
-        energies = np.zeros((len(t_array), len(self.hamiltonian.QN)))
+        if store_psis:
+            psis_t = np.zeros(
+                (len(t_array), len(self.initial_states), len(self.hamiltonian.QN)),
+                dtype="complex",
+            )
+            psis_t[0, :, :] = self.psis
 
-        # Storage for state probabilities
-        probabilities = np.zeros(psis_t.shape)
+        if store_energies:
+            energies = np.zeros((len(t_array), len(self.hamiltonian.QN)))
 
-        # Calculate values for energies and probabilities at t_ini
-        D, V = np.linalg.eigh(H_tini)
+        if store_probabilities:
+            # probabilities has same shape as psis_t would have
+            probabilities = np.zeros(
+                (len(t_array), len(self.initial_states), len(self.hamiltonian.QN))
+            )
 
-        # Store values
-        energies[0, :] = D
-        probabilities[0, :, :] = self.calculate_probabilities(self.psis, V)
+        if store_energies or store_probabilities:
+            D = D_0
+            V = V_0
+            if D is None or V is None:
+                D, V = np.linalg.eigh(H_tini)
+
+            if store_energies and energies is not None:
+                energies[0, :] = D
+            if store_probabilities and probabilities is not None:
+                probabilities[0, :, :] = self.calculate_probabilities(self.psis, V)
 
         return psis_t, energies, probabilities
 
@@ -519,6 +1215,6 @@ class Simulator:
         #     overlaps_list.append(V.conj().T @ psi)
         # overlaps = np.array(overlaps_list)
 
-        overlaps = np.einsum("ij,kj->ki", V.conj().T, psis)
+        overlaps = psis @ V.conj()
 
         return np.abs(overlaps) ** 2

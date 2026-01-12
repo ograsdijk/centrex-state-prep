@@ -427,5 +427,3 @@ def calculate_microwave_ME(state1, state2, reduced=False, pol_vec=np.array((0, 0
             )
 
         return prefactor * M_r
-
-        return prefactor * M_r

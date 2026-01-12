@@ -11,6 +11,7 @@ from centrex_tlf.states import (
     UncoupledState,
     find_closest_vector_idx,
 )
+from scipy.optimize import linear_sum_assignment
 
 
 def vector_to_state(
@@ -85,20 +86,24 @@ def find_max_overlap_idx(state_vec: np.ndarray, V_matrix: np.ndarray) -> int:
 
 def reorder_evecs(
     V_in: np.ndarray, E_in: np.ndarray, V_ref: np.ndarray
-) -> Tuple[np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """
-    Reorders the matrix of eigenvectors V_in (each column is an eigenvector) and
-    corresponding energies E_in so that the eigenvector overlap between V_in and V_ref
-    is maximised.
+    Reorder eigenvectors so that overlaps with V_ref are maximized.
     """
-    # Take dot product between each eigenvector in V and state_vec
-    overlap_vectors = np.absolute(np.matmul(np.conj(V_in.T), V_ref))
+    # Overlap matrix: O[j, k] = <V_ref_j | V_in_k>
+    O = V_ref.conj().T @ V_in
+    cost = -np.abs(O)
 
-    # Find which state has the largest overlap:
-    index = np.argsort(np.argmax(overlap_vectors, axis=1))
-    # Store energy and state
-    E_out = E_in[index]
-    V_out = V_in[:, index]
+    rows, cols = linear_sum_assignment(cost)
+    # rows is [0,1,...,N-1], cols gives matching
+    p = cols
+
+    V_out = V_in[:, p]
+    E_out = E_in[p]
+
+    # Phase alignment for continuity
+    phases = O[rows, p]
+    V_out *= (phases / np.abs(phases))[np.newaxis, :].conj()
 
     return E_out, V_out
 
@@ -183,4 +188,8 @@ def calculate_transition_frequency(
     svec2 = state2.state_vector(QN)
     id1 = find_closest_vector_idx(svec1, V)
     id2 = find_closest_vector_idx(svec2, V)
+    return (D[id2] - D[id1]).real / (2 * np.pi)
+    return (D[id2] - D[id1]).real / (2 * np.pi)
+    return (D[id2] - D[id1]).real / (2 * np.pi)
+    return (D[id2] - D[id1]).real / (2 * np.pi)
     return (D[id2] - D[id1]).real / (2 * np.pi)
