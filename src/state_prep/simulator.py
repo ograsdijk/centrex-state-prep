@@ -640,10 +640,9 @@ class Simulator:
         # For per-field detunings, we require that fields with the same frequency
         # share the same detuning across the batch (otherwise the rotating-frame
         # definition would be ambiguous).
-        n = len(self.hamiltonian.QN)
-        D_mu_diag_base = np.zeros((n,), dtype=float)
+        D_mu_base = np.zeros((len(self.hamiltonian.QN), len(self.hamiltonian.QN)))
         unique_omegas: List[float] = []
-        group_diag_masks: List[np.ndarray] = []
+        group_masks: List[np.ndarray] = []
         group_field_indices: List[List[int]] = []
         for field_i, mw in enumerate(self.microwave_fields):
             omega = 2 * np.pi * mw.muW_freq
@@ -657,8 +656,8 @@ class Simulator:
                 unique_omegas.append(omega)
                 omega_sum = float(np.sum(unique_omegas))
                 mw.generate_D(self.hamiltonian.QN, omega=omega_sum)
-                D_mu_diag_base += np.diag(mw.D)
-                group_diag_masks.append((np.abs(np.diag(mw.D)) > 0).astype(float))
+                D_mu_base += mw.D
+                group_masks.append((np.abs(mw.D) > 0).astype(float))
                 group_field_indices.append([field_i])
                 group = len(unique_omegas) - 1
             else:
@@ -676,13 +675,22 @@ class Simulator:
                     )
             detuning_groups[:, gi] = base
 
-        # Store detuning shifts as diagonals (B,n) instead of dense (B,n,n)
-        D_mu_diag_batch = np.repeat(D_mu_diag_base[None, :], batch, axis=0)
-        for gi, mask in enumerate(group_diag_masks):
-            D_mu_diag_batch -= (2 * np.pi) * detuning_groups[:, gi, None] * mask[None, :]
+        D_mu_batch = np.repeat(D_mu_base[None, :, :], batch, axis=0)
+        for gi, mask in enumerate(group_masks):
+            D_mu_batch -= (2 * np.pi) * detuning_groups[:, gi, None, None] * mask[
+                None, :, :
+            ]
 
         # Coupling scaling: intensity/power prefactor -> E-field prefactor via sqrt
         coupling_scales = np.sqrt(inten_b)
+
+        def H_mu_batch_t(t: float) -> np.ndarray:
+            n = len(self.hamiltonian.QN)
+            out = np.zeros((batch, n, n), dtype=complex)
+            for j, H_mu_t in enumerate(muw_hams):
+                Hj = H_mu_t(t)
+                out += coupling_scales[:, j, None, None] * Hj[None, :, :]
+            return out
 
         H_t = self.hamiltonian.get_H_t_func()
         T = self.trajectory.get_T()
@@ -696,9 +704,8 @@ class Simulator:
             V_fin,
         ) = self._time_evolve_mu_batched_shared_slow(
             H_slow_t=H_t,
-            muw_hams=muw_hams,
-            coupling_scales=coupling_scales,
-            D_mu_diag_batch=D_mu_diag_batch,
+            H_mu_batch_t=H_mu_batch_t,
+            D_mu_batch=D_mu_batch,
             t_array=t_array,
             monitor_states=monitor_states,
             store_final_probabilities=store_final_probabilities,
@@ -726,9 +733,8 @@ class Simulator:
         self,
         *,
         H_slow_t: Callable[[float], np.ndarray],
-        muw_hams: List[Callable[[float], np.ndarray]],
-        coupling_scales: np.ndarray,
-        D_mu_diag_batch: np.ndarray,
+        H_mu_batch_t: Callable[[float], np.ndarray],
+        D_mu_batch: np.ndarray,
         t_array: np.ndarray,
         monitor_states: Optional[List[centrex_tlf.states.UncoupledState]],
         store_final_probabilities: bool,
@@ -741,30 +747,18 @@ class Simulator:
         This is a CPU-only batched variant of `_time_evolve_mu` where H_slow(t)
         is identical across the batch and is diagonalized only once per timestep.
         """
-        # Validate batch shapes
-        if D_mu_diag_batch.ndim != 2:
-            raise ValueError("D_mu_diag_batch must have shape (B,n)")
-        batch = int(D_mu_diag_batch.shape[0])
-
-        coupling_scales = np.asarray(coupling_scales)
-        if coupling_scales.ndim != 2 or coupling_scales.shape[0] != batch:
-            raise ValueError(
-                "coupling_scales must have shape (B,M) matching D_mu_diag_batch batch size"
-            )
-        if coupling_scales.shape[1] != len(muw_hams):
-            raise ValueError(
-                f"coupling_scales has M={coupling_scales.shape[1]} but muw_hams has M={len(muw_hams)}"
-            )
+        # Validate D_mu_batch and infer batch size
+        if D_mu_batch.ndim == 2:
+            batch = 1
+            D_mu_b = D_mu_batch[None, :, :]
+        elif D_mu_batch.ndim == 3:
+            batch = D_mu_batch.shape[0]
+            D_mu_b = D_mu_batch
+        else:
+            raise ValueError("D_mu_batch must have shape (n,n) or (B,n,n)")
 
         # Calculate Hamiltonian at tini
         H_tini = H_slow_t(t_array[0])
-        n = int(H_tini.shape[0])
-        if D_mu_diag_batch.shape[1] != n:
-            raise ValueError(
-                f"D_mu_diag_batch has n={D_mu_diag_batch.shape[1]} but Hamiltonian has n={n}"
-            )
-
-        diag_idx = slice(None, None, n + 1)
 
         # Reference eigen-decomposition at t0 (reused for init + tracking)
         E_ref, V_ref = np.linalg.eigh(H_tini)
@@ -807,19 +801,24 @@ class Simulator:
             Es, evecs = reorder_evecs(evecs, Es, V_ref)
             last_evecs = evecs
 
-            # Pre-rotate each microwave field into the slow-eigenbasis (shared across batch)
+            # Batch-specific microwave terms
+            H_mu_b = H_mu_batch_t(t)
+            if H_mu_b.ndim != 3 or H_mu_b.shape[1:] != (V.shape[0], V.shape[0]):
+                raise ValueError("H_mu_batch_t(t) must return an array of shape (B,n,n)")
+            if H_mu_b.shape[0] != batch:
+                raise ValueError(
+                    f"H_mu_batch_t(t) returned batch={H_mu_b.shape[0]} but D_mu_batch has batch={batch}"
+                )
+
             Vh = V.conj().T
-            H_mu_rot = [Vh @ H_mu_t(t) @ V for H_mu_t in muw_hams]
+            diag_idx = slice(None, None, V.shape[0] + 1)
 
             for b in range(batch):
-                # Assemble rotating-frame Hamiltonian (in slow-eigenbasis)
-                H_rot = (coupling_scales[b, 0] * H_mu_rot[0]).copy()
-                for j in range(1, len(H_mu_rot)):
-                    H_rot += coupling_scales[b, j] * H_mu_rot[j]
-
-                # Add detunings + slow energies to diagonal
+                # Rotate microwave Hamiltonian into slow-eigenbasis and add detunings
+                tmp = H_mu_b[b] @ V
+                H_rot = Vh @ tmp
+                H_rot = H_rot + D_mu_b[b]
                 H_rot.flat[diag_idx] += D
-                H_rot.flat[diag_idx] += D_mu_diag_batch[b]
 
                 # Diagonalize rotating-frame Hamiltonian (per scan point)
                 if eig_backend == "zheevd":
