@@ -6,6 +6,7 @@ import numpy.typing as npt
 from centrex_tlf.states import (
     CoupledBasisState,
     CoupledState,
+    ElectronicState,
     State,
     UncoupledBasisState,
     UncoupledState,
@@ -167,7 +168,17 @@ def make_QN(Jmin, Jmax, I1=1 / 2, I2=1 / 2):
     Function that generates a list of quantum numbersfor TlF
     """
     QN = [
-        UncoupledBasisState(J, mJ, I1, m1, I2, m2)
+        UncoupledBasisState(
+            J,
+            mJ,
+            I1,
+            m1,
+            I2,
+            m2,
+            Omega=0,
+            P=(-1) ** int(J),
+            electronic_state=ElectronicState.X,
+        )
         for J in np.arange(Jmin, Jmax + 1)
         for mJ in np.arange(-J, J + 1)
         for m1 in np.arange(-I1, I1 + 1)
@@ -188,8 +199,4 @@ def calculate_transition_frequency(
     svec2 = state2.state_vector(QN)
     id1 = find_closest_vector_idx(svec1, V)
     id2 = find_closest_vector_idx(svec2, V)
-    return (D[id2] - D[id1]).real / (2 * np.pi)
-    return (D[id2] - D[id1]).real / (2 * np.pi)
-    return (D[id2] - D[id1]).real / (2 * np.pi)
-    return (D[id2] - D[id1]).real / (2 * np.pi)
     return (D[id2] - D[id1]).real / (2 * np.pi)
