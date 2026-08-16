@@ -20,20 +20,29 @@ dependencies = [
     "joblib>=1.5.1",
     "matplotlib>=3.10.5",
     "polars>=1.32.3",
+    "threadpoolctl>=3.5.0",
     "tqdm>=4.67.1",
-
     # from old setup.py:
     "numpy>=2",
     "scipy",
-    "centrex_tlf",
+    "centrex-tlf>=0.1.9",
     "pandas",
     "dill",
 ]
 
 # setuptools configuration for src/ layout & package data
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

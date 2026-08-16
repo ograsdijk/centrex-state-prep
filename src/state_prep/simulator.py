@@ -1,20 +1,50 @@
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Iterator, List, Optional
 
 import centrex_tlf
 import dill
+from joblib import Parallel, delayed, effective_n_jobs
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.linalg.lapack import zheevd
+from threadpoolctl import threadpool_limits
 from tqdm import tqdm
 
 from .electric_fields import ElectricField
 from .hamiltonians import Hamiltonian
 from .magnetic_fields import MagneticField
-from .microwaves import MicrowaveField
+from .microwaves import MicrowaveField, build_rotating_frame_shift
 from .trajectory import Trajectory
 from .utils import find_max_overlap_idx, reorder_evecs, vector_to_state
+
+
+@contextmanager
+def limit_blas_threads(limit: Optional[int]) -> Iterator[None]:
+    """Limit BLAS threads for the duration of a time-evolution loop.
+
+    The Hamiltonians here are small (n = 64 for Js = [0,1,2,3], 100 for
+    [0,1,2,3,4]). At that size OpenBLAS's internal threading costs more in
+    fork/join synchronisation than it recovers, for every eigensolver backend
+    tested, and the penalty grows with n.
+
+    Parallelism belongs at the batch level instead, where each scan point is an
+    independent unit of work. Running batch workers while BLAS is unpinned would
+    also oversubscribe badly (workers x BLAS threads on the same cores).
+
+    Scoped rather than set globally: BLAS threading is a genuine win for large
+    matrices, so pinning is confined to this package's loops and restored on
+    exit, leaving the rest of a notebook session untouched.
+
+    `limit=None` disables the scoping and leaves BLAS configuration alone.
+    """
+    if limit is None:
+        yield
+        return
+
+    with threadpool_limits(limits=limit, user_api="blas"):
+        yield
 
 
 @dataclass
@@ -342,6 +372,142 @@ class MicrowaveScanResult:
     V_ini: Optional[np.ndarray] = None
     V_fin: Optional[np.ndarray] = None
 
+    @property
+    def batch_size(self) -> int:
+        """Number of scan points."""
+        return int(self.psis_final.shape[0])
+
+    def _initial_state_index(self, initial_state: centrex_tlf.states.State) -> int:
+        """Resolve `initial_state` to an index into `self.initial_states`.
+
+        Accepts either the approximate state supplied at setup or the tracked
+        eigenstate the simulator mapped it to, matching `SimulationResult`.
+        """
+        for idx, state in enumerate(self.initial_states):
+            if state is initial_state or state == initial_state:
+                return idx
+        if self.V_ini is None:
+            raise ValueError(
+                "initial_state not found in initial_states, and V_ini is unavailable "
+                "for overlap-based matching."
+            )
+        target = find_max_overlap_idx(
+            initial_state.state_vector(self.hamiltonian.QN), self.V_ini
+        )
+        for idx, state in enumerate(self.initial_states):
+            if (
+                find_max_overlap_idx(
+                    state.state_vector(self.hamiltonian.QN), self.V_ini
+                )
+                == target
+            ):
+                return idx
+        raise ValueError("Could not resolve initial_state to one of initial_states.")
+
+    def get_state_probability(
+        self,
+        state: centrex_tlf.states.UncoupledState,
+        initial_state: centrex_tlf.states.State,
+    ) -> np.ndarray:
+        """Final probability of `state` for `initial_state`, one value per scan point.
+
+        `state` is resolved to the adiabatically tracked eigenstate with the
+        largest overlap at t=0, the same convention `run_microwave_scan` uses for
+        monitor states.
+        """
+        if self.probabilities_final is None:
+            raise ValueError(
+                "No probabilities stored. Re-run with store_final_probabilities=True."
+            )
+        if self.V_ini is None:
+            raise ValueError("V_ini is required to resolve a state index.")
+
+        idx_ini = self._initial_state_index(initial_state)
+        idx_state = find_max_overlap_idx(
+            state.state_vector(self.hamiltonian.QN), self.V_ini
+        )
+        return self.probabilities_final[:, idx_ini, idx_state]
+
+    def get_monitor_probability(
+        self,
+        state: centrex_tlf.states.UncoupledState,
+        initial_state: centrex_tlf.states.State,
+    ) -> np.ndarray:
+        """Final probability of a monitored state, one value per scan point."""
+        if self.monitor_probabilities_final is None:
+            raise ValueError(
+                "No monitor probabilities stored. Re-run with monitor_states=[...] "
+                "and store_final_monitor_probabilities=True."
+            )
+        if not self.monitor_states:
+            raise ValueError("This result has no monitor_states.")
+
+        idx_ini = self._initial_state_index(initial_state)
+        for idx, monitored in enumerate(self.monitor_states):
+            if monitored is state or monitored == state:
+                return self.monitor_probabilities_final[:, idx_ini, idx]
+        raise ValueError("state is not among monitor_states for this result.")
+
+    def plot_state_probability(
+        self,
+        state: centrex_tlf.states.UncoupledState,
+        initial_state: centrex_tlf.states.State,
+        x: Optional[np.ndarray] = None,
+        ax: Optional[plt.Axes] = None,
+        label: Optional[str] = None,
+        xlabel: str = "scan point",
+    ) -> plt.Axes:
+        """Plot the final probability of `state` across the scan.
+
+        `x` is the scan axis (detunings, powers, ...). Defaults to the scan index,
+        since the result object does not know which parameter was varied.
+        """
+        if ax is None:
+            _, ax = plt.subplots()
+        probs = self.get_state_probability(state, initial_state)
+        ax.plot(np.arange(probs.size) if x is None else x, probs, label=label)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("final probability")
+        return ax
+
+    def to_polars(
+        self,
+        initial_state: Optional[centrex_tlf.states.State] = None,
+        **columns: np.ndarray,
+    ):
+        """Return monitor populations as a polars DataFrame, one row per scan point.
+
+        Extra keyword arguments are added as columns, which is how the scanned
+        parameter gets in: ``result.to_polars(detuning_hz=detunings)``.
+        """
+        import polars as pl
+
+        if self.monitor_probabilities_final is None:
+            raise ValueError(
+                "to_polars needs monitor probabilities. Re-run with monitor_states=[...]."
+            )
+        idx_ini = (
+            0 if initial_state is None else self._initial_state_index(initial_state)
+        )
+
+        data: dict[str, np.ndarray] = {"scan_index": np.arange(self.batch_size)}
+        for name, values in columns.items():
+            values = np.asarray(values)
+            if values.shape[0] != self.batch_size:
+                raise ValueError(
+                    f"column {name!r} has length {values.shape[0]}, expected "
+                    f"{self.batch_size}"
+                )
+            data[name] = values
+        for idx in range(self.monitor_probabilities_final.shape[2]):
+            data[f"monitor_{idx}"] = self.monitor_probabilities_final[:, idx_ini, idx]
+        return pl.DataFrame(data)
+
+    def save_to_pickle(self, path: Path) -> None:
+        """Serialise with dill, which handles the callables stored on fields."""
+        with open(path, "wb") as f:
+            dill.dump(self, f)
+
 
 @dataclass
 class Simulator:
@@ -373,6 +539,7 @@ class Simulator:
         store_monitor_probabilities: bool = False,
         store_final_monitor_probabilities: bool = True,
         eig_backend: str = "zheevd",
+        blas_threads: Optional[int] = 1,
     ):
         """
         Runs the simulation.
@@ -399,6 +566,14 @@ class Simulator:
             Eigen-solver backend used for diagonalizations.
             - "zheevd": use LAPACK zheevd (current default)
             - "numpy": use numpy.linalg.eigh
+
+        blas_threads:
+            BLAS threads to allow during time evolution. Defaults to 1, which is
+            substantially faster here because the Hamiltonians are small enough
+            that OpenBLAS's internal threading is pure overhead. The limit is
+            scoped to this call and restored afterwards, so it does not affect
+            other work in the same session. Pass None to leave BLAS
+            configuration alone.
         """
         if store_every < 1:
             raise ValueError("store_every must be >= 1")
@@ -459,57 +634,59 @@ class Simulator:
         if save_idx[-1] != N_steps - 1:
             save_idx = np.append(save_idx, N_steps - 1)
 
-        # Perform time-evolution
-        if self.microwave_fields is None:
-            (
-                psis_t,
-                energies,
-                probabilities,
-                probabilities_final,
-                monitor_probabilities,
-                monitor_probabilities_final,
-                V_ini,
-                V_fin,
-            ) = self._time_evolve(
-                H_t,
-                t_array,
-                save_idx,
-                store_psis=store_psis,
-                store_energies=store_energies,
-                store_probabilities=store_probabilities,
-                store_final_probabilities=store_final_probabilities,
-                progress=progress,
-                monitor_states=monitor_states,
-                store_monitor_probabilities=store_monitor_probabilities,
-                store_final_monitor_probabilities=store_final_monitor_probabilities,
-                eig_backend=eig_backend,
-            )
-        else:
-            (
-                psis_t,
-                energies,
-                probabilities,
-                probabilities_final,
-                monitor_probabilities,
-                monitor_probabilities_final,
-                V_ini,
-                V_fin,
-            ) = self._time_evolve_mu(
-                H_t,
-                H_mu_tot_t,
-                D_mu,
-                t_array,
-                save_idx,
-                store_psis=store_psis,
-                store_energies=store_energies,
-                store_probabilities=store_probabilities,
-                store_final_probabilities=store_final_probabilities,
-                progress=progress,
-                monitor_states=monitor_states,
-                store_monitor_probabilities=store_monitor_probabilities,
-                store_final_monitor_probabilities=store_final_monitor_probabilities,
-                eig_backend=eig_backend,
-            )
+        # Perform time-evolution. BLAS is pinned for the duration: these
+        # Hamiltonians are small enough that its internal threading is overhead.
+        with limit_blas_threads(blas_threads):
+            if self.microwave_fields is None:
+                (
+                    psis_t,
+                    energies,
+                    probabilities,
+                    probabilities_final,
+                    monitor_probabilities,
+                    monitor_probabilities_final,
+                    V_ini,
+                    V_fin,
+                ) = self._time_evolve(
+                    H_t,
+                    t_array,
+                    save_idx,
+                    store_psis=store_psis,
+                    store_energies=store_energies,
+                    store_probabilities=store_probabilities,
+                    store_final_probabilities=store_final_probabilities,
+                    progress=progress,
+                    monitor_states=monitor_states,
+                    store_monitor_probabilities=store_monitor_probabilities,
+                    store_final_monitor_probabilities=store_final_monitor_probabilities,
+                    eig_backend=eig_backend,
+                )
+            else:
+                (
+                    psis_t,
+                    energies,
+                    probabilities,
+                    probabilities_final,
+                    monitor_probabilities,
+                    monitor_probabilities_final,
+                    V_ini,
+                    V_fin,
+                ) = self._time_evolve_mu(
+                    H_t,
+                    H_mu_tot_t,
+                    D_mu,
+                    t_array,
+                    save_idx,
+                    store_psis=store_psis,
+                    store_energies=store_energies,
+                    store_probabilities=store_probabilities,
+                    store_final_probabilities=store_final_probabilities,
+                    progress=progress,
+                    monitor_states=monitor_states,
+                    store_monitor_probabilities=store_monitor_probabilities,
+                    store_final_monitor_probabilities=store_final_monitor_probabilities,
+                    eig_backend=eig_backend,
+                )
 
         # Generate a result object
         result = SimulationResult(
@@ -566,6 +743,10 @@ class Simulator:
         store_final_monitor_probabilities: bool = True,
         progress: bool = True,
         eig_backend: str = "zheevd",
+        workers: int = 1,
+        parallel_backend: str = "loky",
+        allow_multitone_same_manifold: bool = False,
+        blas_threads: Optional[int] = 1,
     ) -> MicrowaveScanResult:
         """Run a batched microwave scan reusing the slow diagonalization.
 
@@ -583,9 +764,50 @@ class Simulator:
         - For M microwave fields, provide arrays shaped (B, M) for batch size B.
         - For M=1, 1D arrays of shape (B,) or scalars are accepted.
         - 1D arrays of shape (M,) imply B=1.
+
+        Parallelism:
+        - `workers=1` (the default) runs the serial shared-slow scan.
+        - `workers>1` or `workers=-1` splits the batch into contiguous chunks and
+          runs one serial shared-slow scan per chunk with joblib's loky backend.
+          Each chunk repeats the shared slow diagonalization, but the chunks run
+          concurrently, so that duplication costs CPU rather than wall time.
+        - For production-sized scans this is a substantial win and is worth
+          using. Output is bitwise identical to the serial path.
+        - The win depends on BLAS being pinned (see `blas_threads`, on by
+          default). With BLAS unpinned, workers x BLAS threads oversubscribe the
+          cores and loky can end up slower than serial.
+        - Loky loses badly on short scans, where process startup and pickling
+          dominate the actual work. There is no automatic size-based fallback,
+          so keep `workers=1` for short scans. The only automatic fallbacks are
+          for a degenerate batch (batch == 1, or `effective_n_jobs(workers)`
+          resolving to 1).
+        - Run-to-run timing varies noticeably at high worker counts because of
+          process startup. Benchmark a worker count on your own machine before
+          committing to it: `benchmarks/bench_microwave_scan.py` sweeps workers,
+          and `benchmarks/paired.py` compares variants with repeats.
+
+        Multi-tone same-manifold fields:
+        - By default, fields with different microwave frequencies that shift the
+          same excited-J manifold are rejected.
+        - `allow_multitone_same_manifold=True` keeps the first field for that
+          manifold as the rotating-frame reference and applies a time-dependent
+          beat phase to additional tones.
+
+        BLAS threads:
+        - `blas_threads` defaults to 1. The Hamiltonians are small (n = 64-100),
+          so OpenBLAS's internal threading is overhead rather than speedup.
+          Pinning does not change results at all.
+        - The limit is scoped to the evolution loop and restored afterwards, so
+          it does not affect other work in the same session.
+        - Pass None to leave BLAS configuration untouched.
         """
         if N_steps < 2:
             raise ValueError("N_steps must be >= 2")
+
+        if workers == 0 or workers < -1:
+            raise ValueError("workers must be -1 or >= 1")
+        if parallel_backend != "loky":
+            raise ValueError("parallel_backend currently only supports 'loky'")
 
         if not self.microwave_fields:
             raise ValueError(
@@ -629,6 +851,40 @@ class Simulator:
             raise ValueError("intensity_prefactors must be >= 0")
 
         batch = int(det_b.shape[0])
+        fields_by_je: dict[int, list[int]] = {}
+        for idx, mw in enumerate(self.microwave_fields):
+            fields_by_je.setdefault(mw.Je, []).append(idx)
+        multitone_jes = [
+            je
+            for je, indices in fields_by_je.items()
+            if len(
+                {
+                    round(float(self.microwave_fields[idx].muW_freq), 6)
+                    for idx in indices
+                }
+            )
+            > 1
+        ]
+        if multitone_jes and not allow_multitone_same_manifold:
+            raise ValueError(
+                "run_microwave_scan found different microwave frequencies on the same "
+                f"excited-J manifold(s) {multitone_jes}. Use "
+                "allow_multitone_same_manifold=True to enable the two-tone path."
+            )
+        if workers != 1 and batch > 1:
+            return self._run_microwave_scan_parallel_loky(
+                detunings_hz=det_b,
+                intensity_prefactors=inten_b,
+                N_steps=N_steps,
+                monitor_states=monitor_states,
+                store_final_probabilities=store_final_probabilities,
+                store_final_monitor_probabilities=store_final_monitor_probabilities,
+                progress=progress,
+                eig_backend=eig_backend,
+                workers=workers,
+                allow_multitone_same_manifold=allow_multitone_same_manifold,
+                blas_threads=blas_threads,
+            )
 
         # Build per-microwave H_mu(t) functions (shared across batch)
         muw_hams = [
@@ -636,50 +892,14 @@ class Simulator:
             for mw in self.microwave_fields
         ]
 
-        # Build base rotating-frame shift D_mu (deduplicated by *frequency*), like `run()`.
-        # For per-field detunings, we require that fields with the same frequency
-        # share the same detuning across the batch (otherwise the rotating-frame
-        # definition would be ambiguous).
-        n = len(self.hamiltonian.QN)
-        D_mu_diag_base = np.zeros((n,), dtype=float)
-        unique_omegas: List[float] = []
-        group_diag_masks: List[np.ndarray] = []
-        group_field_indices: List[List[int]] = []
-        for field_i, mw in enumerate(self.microwave_fields):
-            omega = 2 * np.pi * mw.muW_freq
-            group = None
-            for gi, om in enumerate(unique_omegas):
-                if np.isclose(omega, om):
-                    group = gi
-                    break
-
-            if group is None:
-                unique_omegas.append(omega)
-                omega_sum = float(np.sum(unique_omegas))
-                mw.generate_D(self.hamiltonian.QN, omega=omega_sum)
-                D_mu_diag_base += np.diag(mw.D)
-                group_diag_masks.append((np.abs(np.diag(mw.D)) > 0).astype(float))
-                group_field_indices.append([field_i])
-                group = len(unique_omegas) - 1
-            else:
-                group_field_indices[group].append(field_i)
-
-        # Validate per-field detunings within each frequency group, then build D_mu_batch
-        detuning_groups = np.zeros((batch, len(unique_omegas)), dtype=float)
-        for gi, idxs in enumerate(group_field_indices):
-            base = det_b[:, idxs[0]]
-            for j in idxs[1:]:
-                if not np.allclose(det_b[:, j], base):
-                    raise ValueError(
-                        "Microwave fields with the same muW_freq must share the same detuning in detunings_hz. "
-                        f"Frequency group {gi} has indices {idxs} with differing detunings."
-                    )
-            detuning_groups[:, gi] = base
-
-        # Store detuning shifts as diagonals (B,n) instead of dense (B,n,n)
-        D_mu_diag_batch = np.repeat(D_mu_diag_base[None, :], batch, axis=0)
-        for gi, mask in enumerate(group_diag_masks):
-            D_mu_diag_batch -= (2 * np.pi) * detuning_groups[:, gi, None] * mask[None, :]
+        # Build the rotating-frame shift, deduplicated by frequency. Shared with
+        # the GPU path and the benchmarks so the convention cannot drift.
+        D_mu_diag_batch, _, _ = build_rotating_frame_shift(
+            self.microwave_fields,
+            self.hamiltonian.QN,
+            det_b,
+            skip_repeated_manifolds=bool(multitone_jes),
+        )
 
         # Coupling scaling: intensity/power prefactor -> E-field prefactor via sqrt
         coupling_scales = np.sqrt(inten_b)
@@ -688,24 +908,75 @@ class Simulator:
         T = self.trajectory.get_T()
         t_array = np.linspace(0, T, N_steps)
 
-        (
-            psis_final,
-            probabilities_final,
-            monitor_probabilities_final,
-            V_ini,
-            V_fin,
-        ) = self._time_evolve_mu_batched_shared_slow(
-            H_slow_t=H_t,
-            muw_hams=muw_hams,
-            coupling_scales=coupling_scales,
-            D_mu_diag_batch=D_mu_diag_batch,
-            t_array=t_array,
-            monitor_states=monitor_states,
-            store_final_probabilities=store_final_probabilities,
-            store_final_monitor_probabilities=store_final_monitor_probabilities,
-            progress=progress,
-            eig_backend=eig_backend,
-        )
+        if multitone_jes:
+            component_hams = [
+                mw.get_H_t_components_func(self.trajectory.R_t, self.hamiltonian.QN)
+                for mw in self.microwave_fields
+            ]
+            ref_field_for_je = {
+                je: indices[0]
+                for je, indices in fields_by_je.items()
+            }
+            static_field_indices: list[int] = []
+            beat_fields: list[tuple[int, np.ndarray]] = []
+            for field_idx, mw in enumerate(self.microwave_fields):
+                ref_idx = ref_field_for_je[mw.Je]
+                ref = self.microwave_fields[ref_idx]
+                if np.isclose(mw.muW_freq, ref.muW_freq):
+                    static_field_indices.append(field_idx)
+                    if not np.allclose(det_b[:, field_idx], det_b[:, ref_idx]):
+                        raise ValueError(
+                            "Microwave fields with the same reference frequency and "
+                            "excited-J manifold must share detuning in detunings_hz."
+                        )
+                else:
+                    delta_omega = 2 * np.pi * (
+                        (float(mw.muW_freq) + det_b[:, field_idx])
+                        - (float(ref.muW_freq) + det_b[:, ref_idx])
+                    )
+                    beat_fields.append((field_idx, delta_omega))
+
+            with limit_blas_threads(blas_threads):
+                (
+                    psis_final,
+                    probabilities_final,
+                    monitor_probabilities_final,
+                    V_ini,
+                    V_fin,
+                ) = self._time_evolve_mu_batched_shared_slow_multitone(
+                    H_slow_t=H_t,
+                    component_hams=component_hams,
+                    coupling_scales=coupling_scales,
+                    D_mu_diag_batch=D_mu_diag_batch,
+                    t_array=t_array,
+                    static_field_indices=static_field_indices,
+                    beat_fields=beat_fields,
+                    monitor_states=monitor_states,
+                    store_final_probabilities=store_final_probabilities,
+                    store_final_monitor_probabilities=store_final_monitor_probabilities,
+                    progress=progress,
+                    eig_backend=eig_backend,
+                )
+        else:
+            with limit_blas_threads(blas_threads):
+                (
+                    psis_final,
+                    probabilities_final,
+                    monitor_probabilities_final,
+                    V_ini,
+                    V_fin,
+                ) = self._time_evolve_mu_batched_shared_slow(
+                    H_slow_t=H_t,
+                    muw_hams=muw_hams,
+                    coupling_scales=coupling_scales,
+                    D_mu_diag_batch=D_mu_diag_batch,
+                    t_array=t_array,
+                    monitor_states=monitor_states,
+                    store_final_probabilities=store_final_probabilities,
+                    store_final_monitor_probabilities=store_final_monitor_probabilities,
+                    progress=progress,
+                    eig_backend=eig_backend,
+                )
 
         return MicrowaveScanResult(
             trajectory=self.trajectory,
@@ -720,6 +991,92 @@ class Simulator:
             monitor_probabilities_final=monitor_probabilities_final,
             V_ini=V_ini,
             V_fin=V_fin,
+        )
+
+    def _run_microwave_scan_parallel_loky(
+        self,
+        *,
+        detunings_hz: np.ndarray,
+        intensity_prefactors: np.ndarray,
+        N_steps: int,
+        monitor_states: Optional[List[centrex_tlf.states.UncoupledState]],
+        store_final_probabilities: bool,
+        store_final_monitor_probabilities: bool,
+        progress: bool,
+        eig_backend: str,
+        workers: int,
+        allow_multitone_same_manifold: bool,
+        blas_threads: Optional[int] = 1,
+    ) -> MicrowaveScanResult:
+        batch = int(detunings_hz.shape[0])
+        n_jobs = min(effective_n_jobs(workers), batch)
+        if n_jobs <= 1:
+            return self.run_microwave_scan(
+                detunings_hz=detunings_hz,
+                intensity_prefactors=intensity_prefactors,
+                N_steps=N_steps,
+                monitor_states=monitor_states,
+                store_final_probabilities=store_final_probabilities,
+                store_final_monitor_probabilities=store_final_monitor_probabilities,
+                progress=progress,
+                eig_backend=eig_backend,
+                workers=1,
+                parallel_backend="loky",
+                allow_multitone_same_manifold=allow_multitone_same_manifold,
+                blas_threads=blas_threads,
+            )
+
+        chunk_indices = np.array_split(np.arange(batch), n_jobs)
+
+        def _run_chunk(indices: np.ndarray) -> MicrowaveScanResult:
+            return self.run_microwave_scan(
+                detunings_hz=detunings_hz[indices],
+                intensity_prefactors=intensity_prefactors[indices],
+                N_steps=N_steps,
+                monitor_states=monitor_states,
+                store_final_probabilities=store_final_probabilities,
+                store_final_monitor_probabilities=store_final_monitor_probabilities,
+                progress=False,
+                eig_backend=eig_backend,
+                workers=1,
+                parallel_backend="loky",
+                allow_multitone_same_manifold=allow_multitone_same_manifold,
+                blas_threads=blas_threads,
+            )
+
+        results = Parallel(n_jobs=n_jobs, backend="loky")(
+            delayed(_run_chunk)(indices) for indices in chunk_indices if indices.size
+        )
+        first = results[0]
+
+        self.psis = first.psis_final[0].copy()
+        self.initial_states = first.initial_states
+
+        probabilities_final = None
+        if store_final_probabilities:
+            probabilities_final = np.concatenate(
+                [result.probabilities_final for result in results], axis=0
+            )
+
+        monitor_probabilities_final = None
+        if store_final_monitor_probabilities and first.monitor_probabilities_final is not None:
+            monitor_probabilities_final = np.concatenate(
+                [result.monitor_probabilities_final for result in results], axis=0
+            )
+
+        return MicrowaveScanResult(
+            trajectory=self.trajectory,
+            electric_field=self.electric_field,
+            magnetic_field=self.magnetic_field,
+            initial_states=first.initial_states,
+            hamiltonian=self.hamiltonian,
+            t_array=first.t_array,
+            psis_final=np.concatenate([result.psis_final for result in results], axis=0),
+            probabilities_final=probabilities_final,
+            monitor_states=monitor_states,
+            monitor_probabilities_final=monitor_probabilities_final,
+            V_ini=first.V_ini,
+            V_fin=first.V_fin,
         )
 
     def _time_evolve_mu_batched_shared_slow(
@@ -811,6 +1168,13 @@ class Simulator:
             Vh = V.conj().T
             H_mu_rot = [Vh @ H_mu_t(t) @ V for H_mu_t in muw_hams]
 
+            # The per-point propagator is U = A diag(ph) A^dagger with A = V @ V_rot,
+            # which factors as V (V_rot diag(ph) V_rot^dagger) V^dagger. V is shared
+            # across the batch, so rotate into the slow eigenbasis once here rather
+            # than forming A (an n^3 matmul) for every scan point. Exact, not an
+            # approximation.
+            psis_slow = psis_batch @ V.conj()
+
             for b in range(batch):
                 # Assemble rotating-frame Hamiltonian (in slow-eigenbasis)
                 H_rot = (coupling_scales[b, 0] * H_mu_rot[0]).copy()
@@ -831,14 +1195,157 @@ class Simulator:
                 else:
                     raise ValueError("Unknown eig_backend. Expected 'zheevd' or 'numpy'.")
 
-                A = V @ V_rot
-
                 phases_rot = np.exp(-1j * D_rot * dt)
-                tmp2 = psis_batch[b] @ A.conj()
+                tmp2 = psis_slow[b] @ V_rot.conj()
                 tmp2 *= phases_rot[np.newaxis, :]
-                psis_batch[b] = tmp2 @ A.T
+                psis_slow[b] = tmp2 @ V_rot.T
+
+            # Rotate back out of the slow eigenbasis, once for the whole batch
+            psis_batch = psis_slow @ V.T
 
             # Update reference for eigenvector tracking (shared)
+            V_ref = evecs
+
+        probabilities_final = None
+        if store_final_probabilities:
+            overlaps = psis_batch @ last_evecs.conj()
+            probabilities_final = np.abs(overlaps) ** 2
+
+        monitor_probabilities_final = None
+        if store_final_monitor_probabilities and (monitor_idx is not None):
+            amps = psis_batch @ last_evecs[:, monitor_idx].conj()
+            monitor_probabilities_final = np.abs(amps) ** 2
+
+        return psis_batch, probabilities_final, monitor_probabilities_final, V_ref_ini, V_ref
+
+    def _time_evolve_mu_batched_shared_slow_multitone(
+        self,
+        *,
+        H_slow_t: Callable[[float], np.ndarray],
+        component_hams: List[Callable[[float], tuple[np.ndarray, np.ndarray]]],
+        coupling_scales: np.ndarray,
+        D_mu_diag_batch: np.ndarray,
+        t_array: np.ndarray,
+        static_field_indices: list[int],
+        beat_fields: list[tuple[int, np.ndarray]],
+        monitor_states: Optional[List[centrex_tlf.states.UncoupledState]],
+        store_final_probabilities: bool,
+        store_final_monitor_probabilities: bool,
+        progress: bool,
+        eig_backend: str,
+    ):
+        """Batched shared-slow evolution with beat phases for same-manifold tones."""
+        if D_mu_diag_batch.ndim != 2:
+            raise ValueError("D_mu_diag_batch must have shape (B,n)")
+        batch = int(D_mu_diag_batch.shape[0])
+
+        coupling_scales = np.asarray(coupling_scales)
+        if coupling_scales.ndim != 2 or coupling_scales.shape[0] != batch:
+            raise ValueError(
+                "coupling_scales must have shape (B,M) matching D_mu_diag_batch batch size"
+            )
+        if coupling_scales.shape[1] != len(component_hams):
+            raise ValueError(
+                f"coupling_scales has M={coupling_scales.shape[1]} but component_hams has M={len(component_hams)}"
+            )
+
+        H_tini = H_slow_t(t_array[0])
+        n = int(H_tini.shape[0])
+        if D_mu_diag_batch.shape[1] != n:
+            raise ValueError(
+                f"D_mu_diag_batch has n={D_mu_diag_batch.shape[1]} but Hamiltonian has n={n}"
+            )
+
+        diag_idx = slice(None, None, n + 1)
+
+        E_ref, V_ref = np.linalg.eigh(H_tini)
+        index = np.argsort(E_ref)
+        E_ref = E_ref[index]
+        V_ref = V_ref[:, index]
+        V_ref_ini = V_ref
+
+        monitor_idx: Optional[np.ndarray] = None
+        if monitor_states:
+            monitor_idx = np.array(
+                [
+                    find_max_overlap_idx(s.state_vector(self.hamiltonian.QN), V_ref_ini)
+                    for s in monitor_states
+                ],
+                dtype=int,
+            )
+
+        self.init_state_vecs(H_tini, V_0=V_ref)
+        psis_batch = np.repeat(self.psis[None, :, :], batch, axis=0)
+
+        last_evecs = V_ref
+        for i, t in enumerate(tqdm(t_array[:-1], disable=not progress)):
+            dt = t_array[i + 1] - t_array[i]
+
+            H_slow_i = H_slow_t(t)
+            if eig_backend == "zheevd":
+                D, V, info = zheevd(H_slow_i)
+                if info != 0:
+                    D, V = np.linalg.eigh(H_slow_i)
+            elif eig_backend == "numpy":
+                D, V = np.linalg.eigh(H_slow_i)
+            else:
+                raise ValueError("Unknown eig_backend. Expected 'zheevd' or 'numpy'.")
+
+            Es, evecs = D, V
+            Es, evecs = reorder_evecs(evecs, Es, V_ref)
+            last_evecs = evecs
+
+            Vh = V.conj().T
+            upper_rot: list[np.ndarray] = []
+            lower_rot: list[np.ndarray] = []
+            for component_t in component_hams:
+                upper, lower = component_t(t)
+                upper_rot.append(Vh @ upper @ V)
+                lower_rot.append(Vh @ lower @ V)
+
+            beat_phases = [
+                (field_idx, np.exp(-1j * delta_omega * t))
+                for field_idx, delta_omega in beat_fields
+            ]
+
+            # See the equivalent comment in _time_evolve_mu_batched_shared_slow.
+            # The beat phases change the contents of H_rot but not its basis: the
+            # component matrices are already rotated by Vh ... V, so V still
+            # factors out of the propagator and can be applied once per timestep.
+            psis_slow = psis_batch @ V.conj()
+
+            for b in range(batch):
+                H_rot = np.zeros((n, n), dtype=np.complex128)
+                for field_idx in static_field_indices:
+                    H_rot += coupling_scales[b, field_idx] * (
+                        upper_rot[field_idx] + lower_rot[field_idx]
+                    )
+                for field_idx, phases in beat_phases:
+                    phase = phases[b]
+                    H_rot += coupling_scales[b, field_idx] * (
+                        phase * upper_rot[field_idx]
+                        + phase.conjugate() * lower_rot[field_idx]
+                    )
+
+                H_rot.flat[diag_idx] += D
+                H_rot.flat[diag_idx] += D_mu_diag_batch[b]
+
+                if eig_backend == "zheevd":
+                    D_rot, V_rot, info_rot = zheevd(H_rot)
+                    if info_rot != 0:
+                        D_rot, V_rot = np.linalg.eigh(H_rot)
+                elif eig_backend == "numpy":
+                    D_rot, V_rot = np.linalg.eigh(H_rot)
+                else:
+                    raise ValueError("Unknown eig_backend. Expected 'zheevd' or 'numpy'.")
+
+                phases_rot = np.exp(-1j * D_rot * dt)
+                tmp2 = psis_slow[b] @ V_rot.conj()
+                tmp2 *= phases_rot[np.newaxis, :]
+                psis_slow[b] = tmp2 @ V_rot.T
+
+            psis_batch = psis_slow @ V.T
+
             V_ref = evecs
 
         probabilities_final = None

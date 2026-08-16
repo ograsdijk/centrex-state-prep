@@ -184,6 +184,37 @@ class MicrowaveField:
 
         return H_t
 
+    def get_H_t_components_func(
+        self, R_t: Callable, QN: List[centrex_tlf.states.UncoupledBasisState]
+    ) -> Callable:
+        """
+        Returns a function for the upper/lower rotating-wave coupling components.
+
+        The sum of the returned components is identical to `get_H_t_func(t)`.
+        Keeping them separate lets callers attach a relative beat phase for
+        multi-tone fields on the same rotational manifold without rebuilding
+        matrix elements element-by-element.
+        """
+        E_mu_t = lambda t: self.intensity.E_R(R_t(t))
+        self.E_t = E_mu_t
+
+        p_mu_t = lambda t: self.polarization.p_R(R_t(t), self.intensity, self.muW_freq)
+        self.p_t = p_mu_t
+
+        Hu_x, Hu_y, Hu_z = tuple([np.triu(H) for H in self.H_list])
+        Hl_x, Hl_y, Hl_z = tuple([np.tril(H) for H in self.H_list])
+
+        def H_components_t(t: float) -> tuple[np.ndarray, np.ndarray]:
+            E = E_mu_t(t)
+            p = p_mu_t(t)
+            pd = p.conj()
+            prefactor = 2 * np.pi * XConstants.D_TlF * E / 2
+            upper = prefactor * (p[0] * Hu_x + p[1] * Hu_y + p[2] * Hu_z)
+            lower = prefactor * (pd[0] * Hl_x + pd[1] * Hl_y + pd[2] * Hl_z)
+            return upper, lower
+
+        return H_components_t
+
     def generate_coupling_matrices(
         self, QN: List[centrex_tlf.states.UncoupledBasisState]
     ) -> None:
@@ -427,3 +458,102 @@ def calculate_microwave_ME(state1, state2, reduced=False, pol_vec=np.array((0, 0
             )
 
         return prefactor * M_r
+
+
+def build_rotating_frame_shift(
+    microwave_fields: List["MicrowaveField"],
+    QN: List[centrex_tlf.states.UncoupledBasisState],
+    detunings_hz: np.ndarray,
+    *,
+    skip_repeated_manifolds: bool = False,
+) -> Tuple[np.ndarray, List[float], List[List[int]]]:
+    """Build the batched rotating-frame diagonal shift for a set of microwave fields.
+
+    The rotating frame removes each microwave carrier by shifting the energies of
+    the states it addresses. Fields are deduplicated by *frequency*: several
+    fields sharing a carrier (a drive and its background, say) define one frame
+    and must therefore share a detuning, which is validated here.
+
+    `MicrowaveField.generate_D` only ever writes to the diagonal, so the shift is
+    returned as diagonals of shape `(B, n)` rather than dense `(B, n, n)`.
+
+    Parameters
+    ----------
+    microwave_fields:
+        The fields, in the same order as the columns of `detunings_hz`.
+    QN:
+        Basis states, used to size the shift and to regenerate each field's `D`.
+    detunings_hz:
+        Per-field detunings shaped `(B, M)`, in Hz.
+    skip_repeated_manifolds:
+        Multi-tone mode. When two fields with different carriers address the same
+        excited-J manifold, only the first defines the frame; later ones are
+        handled by an explicit beat phase during evolution and must not shift the
+        frame again.
+
+    Returns
+    -------
+    (D_mu_diag_batch, unique_omegas, group_field_indices)
+        The `(B, n)` diagonal shifts, the angular frequencies defining each
+        frame, and the field indices belonging to each frequency group.
+
+    Raises
+    ------
+    ValueError
+        If fields sharing a carrier frequency are given differing detunings, in
+        which case the rotating frame would be ambiguous.
+    """
+    detunings_hz = np.asarray(detunings_hz, dtype=float)
+    if detunings_hz.ndim != 2:
+        raise ValueError("detunings_hz must have shape (B, M)")
+    batch, n_fields = detunings_hz.shape
+    if n_fields != len(microwave_fields):
+        raise ValueError(
+            f"detunings_hz has {n_fields} columns but there are "
+            f"{len(microwave_fields)} microwave fields"
+        )
+
+    n = len(QN)
+    D_mu_diag_base = np.zeros((n,), dtype=float)
+    unique_omegas: List[float] = []
+    group_diag_masks: List[np.ndarray] = []
+    group_field_indices: List[List[int]] = []
+    shifted_jes: set = set()
+
+    for field_i, mw in enumerate(microwave_fields):
+        if skip_repeated_manifolds and mw.Je in shifted_jes:
+            continue
+        omega = 2 * np.pi * mw.muW_freq
+        group = None
+        for gi, om in enumerate(unique_omegas):
+            if np.isclose(omega, om):
+                group = gi
+                break
+
+        if group is None:
+            unique_omegas.append(omega)
+            mw.generate_D(QN, omega=float(np.sum(unique_omegas)))
+            D_mu_diag_base += np.diag(mw.D)
+            group_diag_masks.append((np.abs(np.diag(mw.D)) > 0).astype(float))
+            group_field_indices.append([field_i])
+        else:
+            group_field_indices[group].append(field_i)
+        shifted_jes.add(mw.Je)
+
+    detuning_groups = np.zeros((batch, len(unique_omegas)), dtype=float)
+    for gi, idxs in enumerate(group_field_indices):
+        base = detunings_hz[:, idxs[0]]
+        for j in idxs[1:]:
+            if not np.allclose(detunings_hz[:, j], base):
+                raise ValueError(
+                    "Microwave fields with the same muW_freq must share the same "
+                    "detuning in detunings_hz. Frequency group "
+                    f"{gi} has indices {idxs} with differing detunings."
+                )
+        detuning_groups[:, gi] = base
+
+    D_mu_diag_batch = np.repeat(D_mu_diag_base[None, :], batch, axis=0)
+    for gi, mask in enumerate(group_diag_masks):
+        D_mu_diag_batch -= (2 * np.pi) * detuning_groups[:, gi, None] * mask[None, :]
+
+    return D_mu_diag_batch, unique_omegas, group_field_indices
