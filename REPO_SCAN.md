@@ -1,6 +1,7 @@
 # Repository Scan
 
-Generated: 2026-06-14
+Generated: 2026-06-14. Partially refreshed 2026-08-16; sections marked below
+were updated, the rest still reflect the original scan.
 
 ## What This Repository Does
 
@@ -96,11 +97,36 @@ Key dependencies:
 
 GPU support is optional and depends on a compatible CuPy package such as `cupy-cuda12x`.
 
-There is also a legacy `setup.py` for the `state_prep` package name. The project metadata in `pyproject.toml` uses the distribution name `centrex-state-prep`.
+`pyproject.toml` is the single source of packaging metadata, under the
+distribution name `centrex-state-prep`. The legacy `setup.py` and the conda
+`state_prep.yml` were removed on 2026-08-16: the former declared a different
+distribution name with a stale dependency list, and the latter pinned py39
+packages against a project requiring 3.11+.
+
+## Added Since The Original Scan (2026-08-16)
+
+- `src/state_prep/__init__.py` now exports the public API; import
+  `state_prep` directly rather than reaching into submodules.
+- `src/state_prep/scans.py`: `scan_grid` and `SCAN_STORAGE_DEFAULTS` for
+  constructing scans.
+- `src/state_prep/microwaves.py`: `build_rotating_frame_shift`, the single
+  implementation of the rotating-frame diagonal shift, previously duplicated
+  across the simulator, the benchmarks and the GPU benchmark.
+- `src/state_prep/simulator.py`: `limit_blas_threads` and the `blas_threads`
+  argument; multitone same-manifold scans; process-parallel scans over loky;
+  accessors on `MicrowaveScanResult`.
+- `tests/`: 20 tests plus a GPU suite skipped without CuPy.
+- `benchmarks/`: `paired.py` (before/after runner with repeats and verdicts)
+  plus `bench_convergence.py`, `bench_eig_backends.py`,
+  `bench_parallel_backends.py`, `bench_serial_fraction.py`,
+  `bench_trotter_conditioning.py`.
+- `scripts/`: SPA2 background-feature analysis and plotting.
+- `AGENTS.md`, `CLAUDE.md`, `IMPROVEMENTS.md`.
 
 ## Current Repository State Notes
 
-At scan time, the worktree already had uncommitted changes in:
+**Superseded.** Everything listed below was committed on 2026-08-16. At the
+time of the original scan the worktree had uncommitted changes in:
 
 - `examples/SPA/Experimental verification/SPA2 - only SPA background - start in J1.ipynb`
 - `examples/SPA/Experimental verification/SPA2 for paper.ipynb`

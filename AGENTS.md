@@ -35,8 +35,19 @@ GPU support is optional. Install CuPy separately (see
 `src/state_prep_gpu/README.md` for the Windows no-CUDA-Toolkit recipe using
 NVIDIA pip wheels).
 
-**There is no test suite and no linter/formatter config.** Do not invent
-`pytest`/`ruff` invocations. Verification is done by:
+**There is a test suite; there is still no linter/formatter config.** Do not
+invent `ruff`/`black` invocations.
+
+```bash
+.\.venv\Scripts\python.exe -m pytest        # 20 tests, ~11 s
+```
+
+The suite covers scan agreement (shared-slow versus repeated `run()`), the
+rotating-frame construction, and the public API. `tests/test_gpu.py` skips
+without CuPy. Tolerances live in `tests/conftest.py` and are named rather than
+inlined, because they cannot be a single number — see the comment there.
+
+Further verification, for anything the suite does not cover:
 
 - running the example scripts (`examples/batched_mu_scan_cpu.py`,
   `src/state_prep_gpu/example_smoke.py`,
@@ -44,12 +55,38 @@ NVIDIA pip wheels).
 - running benchmarks in `benchmarks/`,
 - comparing against the notebooks in `examples/`.
 
+Note what the suite deliberately does *not* prove: it checks internal
+consistency, so a change to the underlying `centrex_tlf` Hamiltonian would move
+every result together and leave all tests passing. For dependency bumps, capture
+reference outputs before and compare after.
+
+### Benchmarks
+
+Every benchmark is parameterised and writes JSON with `benchmark`,
+`generated_at`, `environment`, `config`, `results`; `--csv` additionally writes
+flattened rows.
+
 ```powershell
 .\.venv\Scripts\python.exe benchmarks\bench_storage_modes.py --n-steps 500 --output results\storage.json --csv
 .\.venv\Scripts\python.exe benchmarks\bench_microwave_scan.py --n-steps 500 --batch 5 --compare-naive --output results\microwave.json --csv
 .\.venv\Scripts\python.exe benchmarks\bench_gpu_spa2.py --n-steps 1000 --batch-sweep 5 25 --cpu --gpu --output results\gpu_spa2.json --csv
 .\.venv\Scripts\python.exe benchmarks\bench_gpu_kernels.py --batch 32 --n 32 --output results\gpu_kernels.json --csv
+.\.venv\Scripts\python.exe benchmarks\bench_convergence.py --multitone --n-steps 10000 20000 40000
+.\.venv\Scripts\python.exe benchmarks\bench_parallel_backends.py --n-steps 4000 --batch 25
+.\.venv\Scripts\python.exe benchmarks\bench_serial_fraction.py --n-steps 1500 --batch 25
+.\.venv\Scripts\python.exe benchmarks\bench_eig_backends.py
+.\.venv\Scripts\python.exe benchmarks\paired.py --self-test
 ```
+
+- `bench_convergence.py` — timestep convergence over a detuning × coupling grid,
+  reporting the worst cell. Convergence varies non-monotonically in both axes,
+  so a single parameter point certifies nothing.
+- `bench_parallel_backends.py` — serial, loky and threaded variants end to end.
+- `bench_serial_fraction.py` — separates shared per-timestep work from
+  per-scan-point work and reports the Amdahl ceiling that implies.
+- `bench_eig_backends.py` — eigensolver × BLAS threads × parallelism grid.
+- `bench_trotter_conditioning.py` — exact versus split-step propagator.
+- `paired.py` — the before/after runner. Use it rather than timing pairs.
 
 Every benchmark writes JSON with `benchmark`, `generated_at`, `environment`,
 `config`, `results`; `--csv` additionally writes flattened rows. Shared setup
@@ -75,8 +112,14 @@ Every benchmark writes JSON with `benchmark`, `generated_at`, `environment`,
   `calculate_microwave_power`, and setters `set_frequency/set_position/set_power`.
 - `intensity_profiles.py` — `GaussianBeam`, `BesselGaussianBeam`,
   `MeasuredBeam`, `BackgroundField`, all implementing `I_R(R)` / `E_R(R)`.
-- `simulator.py` — the engine (~1.5k lines). `Simulator`, `SimulationResult`,
-  `MicrowaveScanResult`. See below.
+- `simulator.py` — the engine (~1.7k lines). `Simulator`, `SimulationResult`,
+  `MicrowaveScanResult`, and `limit_blas_threads`. See below.
+- `scans.py` — `scan_grid` builds the `(B, M)` detuning and prefactor arrays,
+  including the case where a physically fixed source stays at zero detuning
+  while the scanned fields move. `SCAN_STORAGE_DEFAULTS` carries the final-only
+  storage settings for scans built on repeated `run()` calls.
+- `__init__.py` — the public API. Import from `state_prep` directly
+  (`import state_prep as sp`) rather than reaching into submodules.
 - `utils.py` — `reorder_evecs`, `find_max_overlap_idx`, `vector_to_state`,
   `matrix_to_states`, `make_QN`, `calculate_transition_frequency`.
 - `plotters.py` — `CouplingPlotter` for microwave matrix elements between
@@ -103,7 +146,13 @@ real workflows.
 `N_steps`, `store_every`, `store_psis`, `store_energies`, `store_probabilities`,
 `store_final_probabilities`, `monitor_states`, `store_monitor_probabilities`,
 `store_final_monitor_probabilities`, `eig_backend` (`"zheevd"` default, or
-`"numpy"`).
+`"numpy"`), `blas_threads` (default `1`).
+
+`blas_threads` pins BLAS for the duration of the evolution loop. The
+Hamiltonians are small enough that OpenBLAS's internal threading is overhead
+rather than speedup, and the limit is scoped and restored on exit so it does not
+affect the rest of a session. It does not change results at all. Pass `None` to
+leave BLAS configuration alone.
 
 Storage mode dominates memory and a large share of runtime. For scans, prefer
 final-only or monitor-only storage; benchmark numbers are in
@@ -123,7 +172,12 @@ instead of looping `run()` whenever `H_slow(t)` is identical across points.
 - Couplings scale as `sqrt(intensity_prefactors)` — the prefactor is an
   *intensity/power* ratio, not an amplitude ratio.
 - `workers > 1` (or `-1`) chunks the batch across loky processes; each chunk
-  repeats the shared slow diagonalization.
+  repeats the shared slow diagonalization, but concurrently, so that duplication
+  costs CPU rather than wall time. This is a substantial win at production scan
+  sizes and produces bitwise identical output. It loses badly on short scans,
+  where process startup dominates, and there is no automatic size-based
+  fallback, so keep `workers=1` there. `workers=1` never enters the loky path at
+  all.
 - Multiple tones shifting the same excited-J manifold are rejected unless
   `allow_multitone_same_manifold=True`, which keeps the first field as the
   rotating-frame reference and applies a beat phase to the rest.

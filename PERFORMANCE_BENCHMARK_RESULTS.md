@@ -1,5 +1,14 @@
 # Performance Benchmark Results
 
+> **Numbers below are single-shot. Read `IMPROVEMENTS.md` for the re-measured
+> figures.**
+>
+> These were recorded before the paired benchmark runner existed, so none carry
+> a spread and several cannot be distinguished from no change at all. The
+> `1.06x` real-SPA2 GPU result in particular has never been shown to differ
+> from unity. Later runs with repeats and interleaving are in `IMPROVEMENTS.md`,
+> together with the environment they were taken in.
+
 Generated: 2026-06-14
 
 This file records benchmarks run after the performance scan in `PERFORMANCE_IMPROVEMENTS.md`.

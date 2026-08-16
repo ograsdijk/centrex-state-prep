@@ -1,5 +1,25 @@
 # Performance Improvements
 
+> **Superseded in part. Read `IMPROVEMENTS.md` alongside this file.**
+>
+> This is the original backlog, from source reading plus a first round of
+> measurement. Later work re-measured several of its conclusions with repeats
+> and interleaving, and some did not survive:
+>
+> - Priorities 8 and 9 are retired: they optimise an intercept worth only a few
+>   percent at realistic batch sizes.
+> - Priority 6 (vectorising the inner loop) was measured end to end and is worth
+>   about 5%, not the larger figure implied here.
+> - The `zheevd` versus NumPy `eigh` comparison recorded below was a single-shot
+>   difference smaller than the run-to-run spread; re-run with repeats it is
+>   statistically unproven.
+> - The conclusion that `loky` should stay at `workers=1` was an artefact of
+>   measuring with BLAS unpinned, which oversubscribed the cores. With BLAS
+>   pinned, process parallelism is a substantial win at production scan sizes.
+>
+> The measurements here remain valid as records of what was run; the
+> recommendations drawn from them are the part that changed.
+
 Generated: 2026-06-14
 
 This file combines the source-level performance scan with the benchmark results recorded in `PERFORMANCE_BENCHMARK_RESULTS.md`. The recommendations below are ordered by current evidence and expected impact.
