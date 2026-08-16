@@ -101,7 +101,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "astropy", specifier = ">=7.1.0" },
-    { name = "centrex-tlf", specifier = ">=0.1.9" },
+    { name = "centrex-tlf", specifier = ">=0.2.1" },
     { name = "dill" },
     { name = "ipykernel", specifier = ">=6.30.1" },
     { name = "joblib", specifier = ">=1.5.1" },
@@ -119,7 +119,7 @@ dev = [{ name = "pytest", specifier = ">=9.1.1" }]
 
 [[package]]
 name = "centrex-tlf"
-version = "0.1.9"
+version = "0.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "matplotlib" },
@@ -131,15 +131,15 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1a/bc/35ab5e4f4bd0306ba2e53833ead798e39b127a2aac6080d45dc5df3bc68c/centrex_tlf-0.1.9-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:d6f72bb5c3fa2b5d8204a3da3ecf6651d367a119c3f916b7d8061a36331557a2", size = 864919, upload-time = "2026-04-30T15:04:31.897Z" },
-    { url = "https://files.pythonhosted.org/packages/96/8f/da86683195aace191d4bb6f914f9121253a120e6de92c84f22aef5e01d85/centrex_tlf-0.1.9-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:7fc5809082897b551087aecbbd2665b9b7c166ec21aaa457ee4c47d910cddc26", size = 955858, upload-time = "2026-04-30T15:04:33.064Z" },
-    { url = "https://files.pythonhosted.org/packages/10/15/ff70bef378b80d3ffbb9a561d72e28e7df94c321a983a3a2665ad409ad09/centrex_tlf-0.1.9-cp311-cp311-win_amd64.whl", hash = "sha256:5df8b52e96b60b1233893e89b177ce9b9b790613e0169fa5c4a7722dec3afdc6", size = 783411, upload-time = "2026-04-30T15:04:34.484Z" },
-    { url = "https://files.pythonhosted.org/packages/4a/d0/04240357c1d614dfd6262bd3bd176df9192fb684be392409a1567f4b6be8/centrex_tlf-0.1.9-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:491d56a6d4db5a5f7ed668ab6ed6c18a58ea99845d4ae6f570bb54f9d3c592fd", size = 859641, upload-time = "2026-04-30T15:04:35.81Z" },
-    { url = "https://files.pythonhosted.org/packages/3c/09/0ff71c7bce5867ac7406e4abc199f44ff3949667b7c195359747faaac8f0/centrex_tlf-0.1.9-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:b487453b2f1acb03afab679e1f71a0e99e1895eb890ff6b7792fe9552e5f69bb", size = 951248, upload-time = "2026-04-30T15:04:37.467Z" },
-    { url = "https://files.pythonhosted.org/packages/5c/91/68cc719f7da8379234fd25260a4c53ca884928a6bf1ade859d02603886b3/centrex_tlf-0.1.9-cp312-cp312-win_amd64.whl", hash = "sha256:e41caa9a340e98a28f29b521f2c255807fac71d8e5b26a4014d364bd3ebcd8dd", size = 782969, upload-time = "2026-04-30T15:04:39.03Z" },
-    { url = "https://files.pythonhosted.org/packages/cc/1c/1e4d95176f2ccead3dd6c2901cc9fa0dbf770e4d59f8855615202a41b05a/centrex_tlf-0.1.9-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:3516148338ae953ec9c228f0360326effca86e19870d7770b651396d32ce3e39", size = 858851, upload-time = "2026-04-30T15:04:40.137Z" },
-    { url = "https://files.pythonhosted.org/packages/74/4a/610250cda4f6334641d1c5e5a2f0ef251254e01766e32def075536647fad/centrex_tlf-0.1.9-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:c26a4abb74da58c8036ec4b8669e7dd6d6bd04c1898e33cf7a6cde6d0387926f", size = 950610, upload-time = "2026-04-30T15:04:41.295Z" },
-    { url = "https://files.pythonhosted.org/packages/79/c1/ec10b89529233561dda491be18120f8e9b2413cba5a9ed9a80a3adabe317/centrex_tlf-0.1.9-cp313-cp313-win_amd64.whl", hash = "sha256:56d9ab825d1c22a148ad81b123d1c926483c1be01336b62f33493555173cd35a", size = 782670, upload-time = "2026-04-30T15:04:42.374Z" },
+    { url = "https://files.pythonhosted.org/packages/ff/eb/ce4788afcbb1be2ef54b604dc8867551c5eff4b75e7feda053029c3cae79/centrex_tlf-0.2.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:a27ef5d8b45f53bacf084009feffbfe66d55c6e070fb3ce58ddebb71ab9c6850", size = 932467, upload-time = "2026-08-13T22:40:12.999Z" },
+    { url = "https://files.pythonhosted.org/packages/a5/5c/6cd4f473af54b02c9fa216f00ae5af4826fff3ada133fa20d945d88c51f1/centrex_tlf-0.2.1-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:0bb14f3000d1e962ee114e5bc5526b2117bffca38cbe3a49419a03e3618d6d8a", size = 1029013, upload-time = "2026-08-13T22:40:14.564Z" },
+    { url = "https://files.pythonhosted.org/packages/46/13/3f02b0f6f213ff2c51d16bd42f98b884ae7c3ef4081bdf3aa1171a8eab4d/centrex_tlf-0.2.1-cp311-cp311-win_amd64.whl", hash = "sha256:5f45205e8ff3421b009e81050834ab725dbe49aba8e0a0b59c42c429b9224ea0", size = 857840, upload-time = "2026-08-13T22:40:15.79Z" },
+    { url = "https://files.pythonhosted.org/packages/0f/dc/551fad0a72aca23b3127c1b4fb6196005219bd883894c19475da97c3db7e/centrex_tlf-0.2.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:03f2df42e6c29f6bb102cdf644fd5e91b0d20a39c2a1f9355b827904ef97fbe0", size = 928954, upload-time = "2026-08-13T22:40:17.255Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/d8/2162f203b56d503670ad087074192143cdf614a2411cb1cca3a21ae2bd53/centrex_tlf-0.2.1-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:0c5caac6bcba996c72d29e28fea4067e557b37ee3a753342ea4c8802f7395973", size = 1023650, upload-time = "2026-08-13T22:40:18.584Z" },
+    { url = "https://files.pythonhosted.org/packages/89/af/a14add725bad11b2bab5230fd249ca9c0825135f7dce9cb48183b926e069/centrex_tlf-0.2.1-cp312-cp312-win_amd64.whl", hash = "sha256:2a1704e94e7218e98b9b1d3844884165773693ff6fb4ef44c026bdf5e6a9424f", size = 854094, upload-time = "2026-08-13T22:40:19.749Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/04/57e418d80627eaff6a8111cd9eb4c6b38e4264197add075a970b20f5dd8a/centrex_tlf-0.2.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:301755b6c117834b0b7d35b984df838d6e457ba03518d602b13f70a75890de52", size = 929166, upload-time = "2026-08-13T22:40:20.788Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/d9/d336e90134f2fe1f55ddc9d3a3d8c37fc14028fdde12ec25b805f23540b8/centrex_tlf-0.2.1-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:f5a0aeb23d04c521f428ede49311ede38029743ce488f71032e6c63adfa469d5", size = 1023641, upload-time = "2026-08-13T22:40:22.32Z" },
+    { url = "https://files.pythonhosted.org/packages/5a/5c/c12a919e97d3298450cd9fcd345cb1a6c14786aa3cb52adea6abfd940855/centrex_tlf-0.2.1-cp313-cp313-win_amd64.whl", hash = "sha256:8a39a8a1c1bc373cf83e4068123ac0736cf928f9e0ea4723b65fcf755d5f2d64", size = 853903, upload-time = "2026-08-13T22:40:23.566Z" },
 ]
 
 [[package]]

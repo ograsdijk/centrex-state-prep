@@ -25,7 +25,7 @@ dependencies = [
     # from old setup.py:
     "numpy>=2",
     "scipy",
-    "centrex-tlf>=0.1.9",
+    "centrex-tlf>=0.2.1",
     "pandas",
     "dill",
 ]
