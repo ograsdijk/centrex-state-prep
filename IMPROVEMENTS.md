@@ -351,6 +351,36 @@ rather than by a tracked index. No change to `N_steps` addresses this, and the
 step count does not need increasing: `20000` is comfortably converged for the
 population sums.
 
+#### Not yet checked — worth doing before relying on existing figures
+
+The diagnosis above rests on **one grid cell** (`det = 0.0 MHz`, prefactor `1`),
+chosen because it was the worst in the grid. It explains that cell cleanly, but
+three things are unverified:
+
+1. **Do the other 24 grid cells swap too, and at which step counts?** The swap
+   partners seen here were `29`/`32` and `14`/`15`. Other detunings may have
+   different near-degenerate pairs, or none.
+2. **Are the published SPA2 background figures affected?** `depletion` only
+   breaks if the run happens to land on the wrong side of a swap. Whether any
+   figure actually did is unknown; nothing here shows one is wrong, only that
+   the observable is capable of being wrong.
+3. **Is `transferred` as safe as it looked?** It was stable to `5.3e-03` here,
+   but it reads index `35` directly and would break if `34`/`35` ever swapped.
+   That pair happened not to swap in this cell.
+
+How to check: rerun the grid and, instead of comparing `probabilities_final`
+elementwise, compare the two reduced observables and the sums over each
+near-degenerate group. A swap shows up as a large elementwise difference with a
+stable group sum, which is the signature already seen. The saved arrays from
+this run are only for the single cell, so the grid needs rerunning:
+
+```powershell
+.\.venv\Scripts\python.exe benchmarks\bench_convergence.py --multitone --n-steps 20000 40000 80000
+```
+
+Until that is done, treat existing multitone figures as probably fine but
+unverified, and prefer `transferred` over `depletion` when reading them.
+
 ### Superseded: Reading This As A Convergence Failure
 
 #### Original (incorrect) reading
