@@ -289,7 +289,72 @@ Findings:
   `N_steps`. A regression-test tolerance therefore cannot be a single global
   number.
 
-### Multitone Convergence Does Not Converge — Open Physics Question
+### Multitone: Adiabatic Label Swaps, Not Non-Convergence — RESOLVED 2026-08-16
+
+**This supersedes and corrects the two sections below.** An earlier reading of
+this data claimed the multitone runs were not converging and that published
+numbers might be wrong. That was wrong. The physics converges; the eigenstate
+*labels* permute.
+
+Running the worst grid cell (`det = 0.0 MHz`, prefactor `1`) at batch `1` across
+a step ladder, the pairwise differences fall into groups rather than a trend:
+
+| | `10000` | `20000` | `40000` | `60000` | `80000` | `160000` |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `10000` | `0` | `4.2e-03` | `4.5e-03` | `7.5e-01` | `7.5e-01` | `1.0e-01` |
+| `40000` | `4.5e-03` | `1.5e-03` | `0` | `7.5e-01` | `7.5e-01` | `1.0e-01` |
+| `80000` | `7.5e-01` | `7.5e-01` | `7.5e-01` | `3.0e-04` | `0` | `7.5e-01` |
+| `160000` | `1.0e-01` | `1.0e-01` | `1.0e-01` | `7.5e-01` | `7.5e-01` | `0` |
+
+Inspecting where the differences live shows they are permutations. Between
+`40000` and `80000`, population `0.75` moves from eigenstate label `32` to label
+`29`, with the same magnitude. Between the cluster and `160000`, `0.10` moves
+between labels `14` and `15`.
+
+Summing over each pair confirms the populations are stable:
+
+| `N_steps` | `P(14) + P(15)` | `P(34) + P(35)` |
+| ---: | ---: | ---: |
+| `10000` | `0.097692` | `0.785434` |
+| `40000` | `0.100170` | `0.780903` |
+| `80000` | `0.100865` | `0.779941` |
+| `160000` | `0.100812` | `0.780013` |
+
+Stable to about `0.3%` across a `16x` range in step count. `reorder_evecs`
+matches eigenvectors by overlap, and for near-degenerate states either
+assignment is equally valid, so which label a population lands under depends on
+how the beat is sampled.
+
+**Consequence for the analysis.** Observables that index a single eigenstate are
+unreliable here; observables that sum over the degenerate group are fine. As
+`scripts/analyze_spa2_bg_feature.py` computes them:
+
+| `N_steps` | `depletion` | `transferred` |
+| ---: | ---: | ---: |
+| `10000` | `0.902308` | `0.879206` |
+| `40000` | `0.899830` | `0.876260` |
+| `80000` | `0.899135` | `0.880572` |
+| `160000` | `1.000000` | `0.875540` |
+
+- `transferred` sums the target and the monitors: spread `5.3e-03` across the
+  whole ladder. Robust in practice, though structurally it still reads index
+  `35` and would break if `34`/`35` ever swapped.
+- `depletion` is `1 - P[initial, 14]`, a single index. At `160000` the
+  population sits under label `15`, so depletion reads exactly `1.000000`
+  instead of about `0.90`. That is a real defect in the observable, not in the
+  simulation.
+
+**Recommended fix, at the analysis level rather than the propagator:** identify
+the near-degenerate group around the initial and target states and sum over it,
+or select states by overlap with the intended physical state at the final time
+rather than by a tracked index. No change to `N_steps` addresses this, and the
+step count does not need increasing: `20000` is comfortably converged for the
+population sums.
+
+### Superseded: Reading This As A Convergence Failure
+
+#### Original (incorrect) reading
+
 
 **Measured 2026-08-16 with `benchmarks/bench_convergence.py --multitone`,
 `N_steps` in `{10000, 20000, 40000, 80000}`, referenced to `80000`, over the
