@@ -90,6 +90,13 @@ result = simulator.run_microwave_scan(
 production-sized scans; see the `run_microwave_scan` docstring for when it helps
 and when it does not.
 
+For a cascade using distinct microwave carriers, list fields in low-to-high
+rotational order (for example J = 0 -> 1, then J = 1 -> 2). The rotating-frame
+shift for an upper rung includes the carrier and detuning of every rung below it.
+Fields sharing a carrier define one rotating-frame rung; use
+`allow_multitone_same_manifold=True` only for distinct carriers addressing the
+same excited-J manifold.
+
 ## Benchmarks
 
 `benchmarks/` holds parameterised benchmark scripts that emit JSON and CSV.

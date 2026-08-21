@@ -85,6 +85,106 @@ def test_all_call_sites_agree(spa2_setup):
     assert np.array_equal(reference, from_gpu)
 
 
+def test_cascade_accumulates_detunings_up_the_ladder(cascade_setup):
+    """A level sits on top of every rung below it, so it carries all their detunings.
+
+    The carriers have always accumulated. The detunings did not: they were applied
+    through each field's own `J == Je` mask, so a lower rung's detuning never
+    reached the manifolds above it, leaving the upper coupling with a residual
+    `exp(i*delta*t)` phase in the rotating frame.
+    """
+    from state_prep.microwaves import build_rotating_frame_shift
+
+    fields = cascade_setup["microwave_fields"]
+    qn = cascade_setup["hamiltonian"].QN
+    f01, f12 = cascade_setup["frequencies"]
+    js = np.array([q.J for q in qn])
+
+    d01, d12 = 1e6, -0.4e6
+    shift, omegas, groups = build_rotating_frame_shift(
+        fields, qn, np.array([[d01, d12]])
+    )
+
+    # Two rungs, two carriers, one field each.
+    assert len(omegas) == 2
+    assert groups == [[0], [1]]
+
+    assert np.allclose(shift[0][js == 0], 0.0)
+    assert np.allclose(shift[0][js == 1], -2 * np.pi * (f01 + d01))
+    assert np.allclose(shift[0][js == 2], -2 * np.pi * (f01 + d01 + f12 + d12))
+    # J=3 is in the manifold because the DC field couples to it, but no microwave
+    # addresses it, so it defines no frame.
+    assert np.allclose(shift[0][js == 3], 0.0)
+
+
+def test_cascade_fields_must_be_ordered_low_rung_first(cascade_setup):
+    """Otherwise the cumulative carrier sum puts a rung on top of the wrong levels."""
+    from state_prep.microwaves import build_rotating_frame_shift
+
+    mf01, mf12 = cascade_setup["microwave_fields"]
+    qn = cascade_setup["hamiltonian"].QN
+
+    with pytest.raises(ValueError, match="cascade in list order"):
+        build_rotating_frame_shift([mf12, mf01], qn, np.zeros((1, 2)))
+
+
+def test_cascade_scan_matches_run_with_lower_rung_detuned(cascade_setup):
+    """The regression test for the cascade bug.
+
+    `Simulator.run` puts the detuning inside `muW_freq`, where the cumulative
+    carrier sum picks it up, and so was always right. `run_microwave_scan` applies
+    detunings separately and was not. Holding the lower rung off resonance is what
+    separates the two paths; with `d01 = 0` this passed even before the fix.
+    """
+    from state_prep import Simulator
+    from conftest import SAME_BACKEND_TOL
+
+    mf01, mf12 = cascade_setup["microwave_fields"]
+    f01, f12 = cascade_setup["frequencies"]
+    sim = Simulator(
+        cascade_setup["trajectory"],
+        cascade_setup["electric_field"],
+        cascade_setup["magnetic_field"],
+        cascade_setup["initial_states"],
+        cascade_setup["hamiltonian"],
+        [mf01, mf12],
+    )
+
+    n_steps = 300
+    d01 = 1e6
+    d12_axis = np.array([-0.5e6, 0.0, 0.5e6])
+    det = np.column_stack([np.full(d12_axis.size, d01), d12_axis])
+
+    scanned = sim.run_microwave_scan(
+        detunings_hz=det,
+        intensity_prefactors=np.ones_like(det),
+        N_steps=n_steps,
+        store_final_probabilities=True,
+        progress=False,
+    )
+
+    try:
+        for i, d12 in enumerate(d12_axis):
+            mf01.set_frequency(f01 + d01)
+            mf12.set_frequency(f12 + d12)
+            expected = sim.run(
+                N_steps=n_steps,
+                store_psis=False,
+                store_energies=False,
+                store_probabilities=False,
+                store_final_probabilities=True,
+                progress=False,
+            )
+            assert np.allclose(
+                scanned.probabilities_final[i],
+                expected.probabilities_final,
+                atol=SAME_BACKEND_TOL,
+            ), f"scan and run disagree at d12 = {d12 / 1e6:+.2f} MHz"
+    finally:
+        mf01.set_frequency(f01)
+        mf12.set_frequency(f12)
+
+
 def test_multitone_rejected_by_default(simulator, spa2_setup, multitone_fields, detunings):
     """Two carriers on one manifold is ambiguous unless explicitly allowed."""
     from state_prep import Simulator, scan_grid

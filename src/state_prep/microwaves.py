@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import centrex_tlf
 import numpy as np
@@ -477,6 +477,27 @@ def build_rotating_frame_shift(
     `MicrowaveField.generate_D` only ever writes to the diagonal, so the shift is
     returned as diagonals of shape `(B, n)` rather than dense `(B, n, n)`.
 
+    Cascades
+    --------
+    Fields may form a ladder, as in SPA: J=0 -(w01)-> J=1 -(w12)-> J=2. A level is
+    then shifted by the *sum* of every carrier below it, because it sits on top of
+    all of them::
+
+        J=0:  0
+        J=1: -(w01 + d01)
+        J=2: -(w01 + d01 + w12 + d12)
+
+    Carriers accumulate through `omega=sum(unique_omegas)` below, and detunings
+    accumulate through the cumulative masks further down; the two must agree, or
+    the coupling between the upper rungs keeps a residual `exp(i*d*t)` phase in the
+    rotating frame instead of being static.
+
+    This requires the frame-defining fields to be ordered low rung first, with each
+    field's ground manifold equal to the previous field's excited manifold. That is
+    validated, since the alternative is a silently wrong frame. Fields that do not
+    define a frame -- extra fields on a carrier already seen, or manifolds skipped
+    under `skip_repeated_manifolds` -- are exempt.
+
     Parameters
     ----------
     microwave_fields:
@@ -501,7 +522,8 @@ def build_rotating_frame_shift(
     ------
     ValueError
         If fields sharing a carrier frequency are given differing detunings, in
-        which case the rotating frame would be ambiguous.
+        which case the rotating frame would be ambiguous, or if the frame-defining
+        fields do not form a cascade in list order.
     """
     detunings_hz = np.asarray(detunings_hz, dtype=float)
     if detunings_hz.ndim != 2:
@@ -519,6 +541,8 @@ def build_rotating_frame_shift(
     group_diag_masks: List[np.ndarray] = []
     group_field_indices: List[List[int]] = []
     shifted_jes: set = set()
+    prev_group_field: Optional["MicrowaveField"] = None
+    prev_group_field_i: Optional[int] = None
 
     for field_i, mw in enumerate(microwave_fields):
         if skip_repeated_manifolds and mw.Je in shifted_jes:
@@ -531,11 +555,24 @@ def build_rotating_frame_shift(
                 break
 
         if group is None:
+            # This field defines a new rung. `omega=sum(unique_omegas)` places it
+            # on top of every rung below, which is only meaningful if it actually
+            # sits on top of them.
+            if prev_group_field is not None and mw.Jg != prev_group_field.Je:
+                raise ValueError(
+                    "Microwave fields defining the rotating frame must form a "
+                    "cascade in list order, each field's Jg matching the previous "
+                    f"field's Je. Field {field_i} has Jg={mw.Jg} but the previous "
+                    f"frame-defining field (index {prev_group_field_i}) has "
+                    f"Je={prev_group_field.Je}. Reorder the fields low rung first."
+                )
             unique_omegas.append(omega)
             mw.generate_D(QN, omega=float(np.sum(unique_omegas)))
             D_mu_diag_base += np.diag(mw.D)
             group_diag_masks.append((np.abs(np.diag(mw.D)) > 0).astype(float))
             group_field_indices.append([field_i])
+            prev_group_field = mw
+            prev_group_field_i = field_i
         else:
             group_field_indices[group].append(field_i)
         shifted_jes.add(mw.Je)
@@ -552,8 +589,16 @@ def build_rotating_frame_shift(
                 )
         detuning_groups[:, gi] = base
 
+    # Detunings accumulate up the cascade exactly as the carriers do above: group
+    # `gi` shifts its own manifold and every manifold above it. Summing the masks
+    # from the top down gives that, and cannot double count because the chain
+    # validation guarantees one manifold per group.
     D_mu_diag_batch = np.repeat(D_mu_diag_base[None, :], batch, axis=0)
-    for gi, mask in enumerate(group_diag_masks):
-        D_mu_diag_batch -= (2 * np.pi) * detuning_groups[:, gi, None] * mask[None, :]
+    cumulative_mask = np.zeros_like(D_mu_diag_base)
+    for gi in range(len(group_diag_masks) - 1, -1, -1):
+        cumulative_mask = cumulative_mask + group_diag_masks[gi]
+        D_mu_diag_batch -= (
+            (2 * np.pi) * detuning_groups[:, gi, None] * cumulative_mask[None, :]
+        )
 
     return D_mu_diag_batch, unique_omegas, group_field_indices

@@ -793,6 +793,14 @@ class Simulator:
           manifold as the rotating-frame reference and applies a time-dependent
           beat phase to additional tones.
 
+        Cascaded fields:
+        - Fields that define distinct rotating-frame carriers must be ordered as
+          a ladder: `J=0 -> 1`, then `J=1 -> 2`, and so on. A field's `Jg` must
+          equal the preceding frame-defining field's `Je`.
+        - A level in an upper rung carries the cumulative carrier and detuning
+          shifts of every rung below it. Fields sharing a carrier define one
+          frame and do not introduce another rung.
+
         BLAS threads:
         - `blas_threads` defaults to 1. The Hamiltonians are small (n = 64-100),
           so OpenBLAS's internal threading is overhead rather than speedup.

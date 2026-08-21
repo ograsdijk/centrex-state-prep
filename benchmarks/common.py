@@ -394,6 +394,128 @@ def build_spa2_setup(*, js: Sequence[int] = (0, 1, 2, 3), v_forward: float = 184
     }
 
 
+def build_cascade_microwaves(hamiltonian: Any, *, omega_nominal: Optional[float] = None):
+    """SPA1 (J=0->1) and SPA2 (J=1->2) as a two-rung cascade, no background fields.
+
+    Same optics as `build_microwaves` -- pure z polarization, k along x, the 1 inch
+    FWHM Gaussian -- but two rungs and nothing stray. Each field's carrier is the
+    transition frequency evaluated at *its own* beam centre.
+
+    Powers are anchored to a Rabi rate rather than set in Watts, so the two rungs
+    are driven equivalently despite their different matrix elements.
+    `omega_nominal` defaults to what the established SPA2 operating point of
+    `power_w=5e-5` produces (see `configure_microwaves`).
+
+    Returns `(mf01, mf12, frequencies, positions)` with the fields ordered low rung
+    first, which `build_rotating_frame_shift` requires for a cascade.
+    """
+    from state_prep.approximate_states import (
+        J0_triplet_0,
+        J1_triplet_0,
+        J2_triplet_0,
+    )
+    from state_prep.intensity_profiles import GaussianBeam
+    from state_prep.microwaves import MicrowaveField, Polarization
+    from state_prep.utils import calculate_transition_frequency
+
+    sigma = 25.4e-3 / (2 * np.sqrt(2 * np.log(2)))
+    k_vec = np.array((1.0, 0.0, 0.0))
+    p_z = np.array([0.0, 0.0, 1.0])
+
+    def p_r(_position):
+        return p_z / np.sqrt(np.sum(p_z**2))
+
+    polarization = Polarization(p_r, k_vec, f_long=1)
+
+    rungs = [
+        (0, 1, J0_triplet_0, J1_triplet_0, np.array((0.0, 0.0, 0.0))),
+        (1, 2, J1_triplet_0, J2_triplet_0, np.array((0.0, 0.0, 0.0254 * 1.125))),
+    ]
+
+    fields, frequencies, positions = [], [], []
+    for jg, je, lower, upper, r0 in rungs:
+        frequency = calculate_transition_frequency(
+            lower, upper, hamiltonian.H_R(r0), hamiltonian.QN
+        )
+        intensity = GaussianBeam(
+            power=5e-5, sigma=sigma, R0=r0, k=k_vec, freq=frequency
+        )
+        field = MicrowaveField(
+            jg, je, intensity, polarization, frequency, QN=hamiltonian.QN
+        )
+        fields.append(field)
+        frequencies.append(frequency)
+        positions.append(r0)
+
+    if omega_nominal is None:
+        omega_nominal = fields[1].calculate_rabi_rate(
+            J1_triplet_0, J2_triplet_0, 5e-5, positions[1]
+        )
+    for field, (_, _, lower, upper, r0) in zip(fields, rungs):
+        # Sets intensity.power in place; it does not return the power.
+        field.calculate_microwave_power(lower, upper, omega_nominal, r0)
+
+    return fields[0], fields[1], frequencies, positions
+
+
+def spa_cascade_initial_states() -> list[Any]:
+    """The four J=0 hyperfine sublevels: F=0 mF=0, then F=1 mF=-1, 0, +1."""
+    from state_prep.approximate_states import (
+        J0_singlet,
+        J0_triplet_0,
+        J0_triplet_m,
+        J0_triplet_p,
+    )
+
+    return [J0_singlet, J0_triplet_m, J0_triplet_0, J0_triplet_p]
+
+
+def spa_cascade_targets(j: int) -> list[Any]:
+    """Matched nuclear-spin partners in manifold `j`, ordered as the initial states."""
+    import state_prep.approximate_states as approx
+
+    return [
+        getattr(approx, f"J{j}_singlet"),
+        getattr(approx, f"J{j}_triplet_m"),
+        getattr(approx, f"J{j}_triplet_0"),
+        getattr(approx, f"J{j}_triplet_p"),
+    ]
+
+
+def build_spa_cascade_setup(
+    *,
+    js: Sequence[int] = (0, 1, 2, 3),
+    v_forward: float = 184.0,
+    omega_nominal: Optional[float] = None,
+):
+    """Full SPA1+SPA2 cascade setup with no stray-microwave background.
+
+    The companion to `build_spa2_setup` for work that needs both rungs. J=0 and J=3
+    stay in the manifold because the DC electric field couples to them, and the
+    nominal 1e-3 magnetic field is kept so the mF sublevels are non-degenerate and
+    adiabatic labelling is well defined.
+    """
+    trajectory, electric_field, magnetic_field, hamiltonian = build_fields_and_hamiltonian(
+        js=js,
+        v_forward=v_forward,
+    )
+    mf01, mf12, frequencies, positions = build_cascade_microwaves(
+        hamiltonian, omega_nominal=omega_nominal
+    )
+    return {
+        "trajectory": trajectory,
+        "electric_field": electric_field,
+        "magnetic_field": magnetic_field,
+        "hamiltonian": hamiltonian,
+        "microwave_fields": [mf01, mf12],
+        "frequencies": frequencies,
+        "positions": positions,
+        "initial_states": spa_cascade_initial_states(),
+        "targets_j1": spa_cascade_targets(1),
+        "targets_j2": spa_cascade_targets(2),
+    }
+
+
 def compute_eb_t(*, trajectory: Any, electric_field: Any, magnetic_field: Any, t_array: np.ndarray):
     e_t = np.empty((t_array.size, 3), dtype=float)
     b_t = np.empty((t_array.size, 3), dtype=float)

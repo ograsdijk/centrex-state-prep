@@ -55,6 +55,19 @@ def simulator(spa2_setup):
 
 
 @pytest.fixture(scope="session")
+def cascade_setup():
+    """SPA1 + SPA2 as a two-rung cascade, no background fields.
+
+    Distinct from `spa2_setup`, which has both its fields on one excited manifold.
+    A cascade is the only shape that exercises accumulating a lower rung's detuning
+    into the manifolds above it.
+    """
+    from common import build_spa_cascade_setup
+
+    return build_spa_cascade_setup()
+
+
+@pytest.fixture(scope="session")
 def multitone_fields(spa2_setup):
     """SPA2 + SPA background + RC background, all on the same excited-J manifold."""
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
