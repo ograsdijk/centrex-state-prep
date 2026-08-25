@@ -396,7 +396,165 @@ rather than by a tracked index. No change to `N_steps` addresses this, and the
 step count does not need increasing: `20000` is comfortably converged for the
 population sums.
 
-#### Not yet checked — worth doing before relying on existing figures
+### Label Swaps Are Crossings, Not Degeneracy — DIAGNOSED AND FIXED 2026-08-24
+
+**This supersedes the mechanism given above, and the fix recommended with it.**
+The observation was right: labels permute and population sums are stable. The
+explanation was wrong, and so was the proposed remedy.
+
+**Not near-degeneracy — a swept crossing.** Measured on the SPA2 setup with the
+microwaves off, which reproduces the whole effect without any scan:
+
+| `N_steps` | index holding the population | its `(F, mF)` | population |
+| ---: | ---: | --- | ---: |
+| `2000` | `14` | `F=2, mF=0` | `0.999749` |
+| `10000` | `14` | `F=2, mF=0` | `0.999990` |
+| `40000` | `14` | `F=2, mF=0` | `0.999991` |
+| `160000` | **`15`** | `F=2, mF=0` | `0.999991` |
+
+The physical state is `F=2, mF=0` at every step count, holding `0.99999`. Only
+the *index* moves. The initial state meets its `F=1, mF=0` partner at
+`t/T = 0.691` with a minimum gap of about `3.2 Hz` against a Fourier width of
+`657 Hz` (transit `1521.74 us`), and the passage is diabatic. `reorder_evecs`
+labels adiabatically, so the label follows one branch while the population
+follows the other.
+
+**The direction matters and is counter-intuitive: a finer timestep makes the
+label *more* likely to be wrong**, because it resolves the crossing that a
+coarse step jumps over. That is why `160000` is the outlier while `10000`,
+`40000` and `80000` agree — not because the coarse runs were under-resolved.
+
+This is the same mechanism a separate `J=2, mF=0` analysis of the TlF
+Hamiltonian arrives at from the opposite direction: `mF=0` levels cross exactly
+when `B` is perpendicular to `E`, and only `B_parallel` opens a gap, at about
+`1620 Hz/G`. Here `B = (0, 0, 1e-3) T` is exactly parallel to `E`
+(`benchmarks/common.py`), so 10 mG predicts a gap of order Hz — which is what is
+measured. The conclusion there — that the physical mapping through such a
+crossing is the diabatic one — is precisely the mismatch.
+
+**Summing over the near-degenerate group — the fix recommended above — is
+wrong.** That group is the `F=2` `mF` multiplet:
+
+| index | `E - E14` (Hz) | `F` | `mF` |
+| ---: | ---: | ---: | ---: |
+| `10` | `-3.2796` | `2` | `+2` |
+| `11` | `+3.2786` | `2` | `-2` |
+| `12` | `-1.6397` | `2` | `+1` |
+| `13` | `+1.6394` | `2` | `-1` |
+| `14` | `0.0000` | `2` | `0` |
+| `15` | `-14538.78` | `1` | `0` |
+
+Those sublevels are degenerate at readout only because the field has ramped off.
+They have different selection rules, and a field applied at detection separates
+them, so summing over them destroys exactly the information a state-preparation
+simulation exists to produce. The simulation must not bake in what a particular
+detector happens to be unable to resolve.
+
+**The fix that shipped:** identify states by quantum numbers, not by index.
+`probabilities_final[..., k]` is the population in `V_fin[:, k]`, and `V_fin` was
+already returned, so nothing needed to be plumbed through — the defect was one
+line reading a `t=0` index against a `t=T` array.
+
+- `state_prep.utils.eigenstate_quantum_numbers(V, QN)` gives `(J, F1, F, mF)`
+  and their *spreads* per eigenvector; `select_eigenstate` picks the unique
+  match. `F1` is required: `(J, F, mF)` is not unique, since `J=1` has two `F=1`
+  levels. Spreads matter because `F` is badly mixed while the Stark field is on
+  (the "triplet" states run `F = 2.372 +- 4.899`) and only becomes good at
+  readout.
+- `SimulationResult.population(...)` / `MicrowaveScanResult.population(...)`
+  select by quantum numbers. Prefer them over `get_state_probability`.
+- `scripts/analyze_spa2_bg_feature.py` now selects this way and stores the full
+  resolved distribution (`final_populations`, `final_quantum_numbers`) instead of
+  collapsing to four scalars at write time.
+- Verified: at `N_steps=160000` the old path gives `depletion = 1.000000` and the
+  new one gives `0.000009`, matching `10000` and `40000`. Bit-identical wherever
+  the tracking was already right.
+
+**Crossings here are pervasive, not exceptional.** The new `LabelGapTracker`
+diagnostic counts rank changes per label: **56 of 64 labels cross something**,
+almost all between `t/T = 0.90` and `0.96` as the Stark field collapses. So
+adiabatic labels in this system are broadly unreliable, which is the argument
+for quantum numbers rather than a caveat about one bad crossing.
+`result.unreliable_labels()` reports them, and the tracked-index accessors warn
+once per result. A bare-gap threshold was tried first and is useless — it flags
+63 of 64 — because it cannot tell a static end-of-trajectory degeneracy from a
+swept crossing.
+
+**Known issue, not fixed:** `src/state_prep_gpu/_reorder.py` matches by greedy
+`argmax` rather than the Hungarian assignment the CPU path uses. Upstream's own
+docstring notes that greedy matching silently produces an arbitrary ordering when
+two eigenvectors claim the same reference column. GPU labels may therefore differ
+from CPU ones. Left alone deliberately: there is no CuPy `linear_sum_assignment`,
+so fixing it needs a host round-trip or a batched auction kernel, to repair
+labels that should not be load-bearing now that quantum-number selection exists.
+
+#### Grid Audit Closed — `transferred` Is The One That Breaks, 2026-08-24
+
+Run with `scripts/audit_multitone_labels.py --n-steps 20000 40000 80000
+--workers 8`, which reads every observable twice: once through a tracked `V_ini`
+index, as the analysis used to, and once by quantum numbers. A swap shows up as
+the two readings disagreeing.
+
+| `N_steps` | elementwise | `depletion` (qn) | `depletion` (idx) | `transferred` (qn) | `transferred` (idx) |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| `20000` | `1.749e-02` | `2.546e-03` | `2.546e-03` | `2.676e-03` | `1.629e-02` |
+| `40000` | `1.749e-02` | `1.438e-03` | `1.438e-03` | `1.183e-03` | `1.866e-02` |
+
+Referenced to `80000`. Tracked indices disagreeing with the quantum-number
+selection: **none** at `20000`, **none** at `40000`, **`monitor0`** at `80000`.
+
+**First, a correction to how the question was posed above.** "Do the other 24
+grid cells swap?" is not well formed. The batched path shares one slow
+eigenbasis across the whole scan, so there is a single `V_fin` and a single set
+of indices per run. A swap is a property of the *trajectory and step count*, not
+of a detuning. The right question is which step counts swap, and the answer is
+`80000`.
+
+**`depletion` is clean.** The two readings are identical to every digit at both
+step counts, so the `2.573e-03` residual is ordinary convergence error and not a
+labelling artefact. No cell reads `1.000000`. The `det=0.0, pref=1` cell gives
+`0.899910 / 0.899830 / 0.899135`, matching the earlier ladder.
+
+**`transferred` is not clean, and it was the observable previously called
+robust.** At `80000` the monitor label swaps and `transferred` inherits it: read
+through tracked indices the error is `1.866e-02`, read by quantum numbers it is
+`1.183e-03` — a factor of `16`. Most of the flat `1.749e-02` elementwise
+"non-convergence" is this swap rather than physics, which is why the elementwise
+metric refused to improve with step count.
+
+**The pair involved is a known one.** `monitor0` is `J=2, F1=5/2, F=2, mF=0` and
+the target is `J=2, F1=5/2, F=3, mF=0` — exactly the two branches picked out by
+the separate `J=2, mF=0` analysis noted above, which shows they cross exactly at
+`0.349 kV/cm` when `B` is perpendicular to `E` and are separated only by
+`B_parallel` at about `1620 Hz/G`. That analysis and this one arrived at the
+same crossing from opposite directions.
+
+The swapped indices are **`32` -> `29`**, which is exactly the pair the original
+single-cell diagnosis named ("population `0.75` moves from eigenstate label `32`
+to label `29`"). That observation was correct and is reproduced here
+independently; only its explanation — near-degeneracy rather than a crossing —
+was wrong.
+
+**Consequences.**
+
+- Published figures at `N_steps` of `10000` or `20000` are unaffected: no swap
+  occurs there, by either observable.
+- `transferred` must be read by quantum numbers, not by index `35` plus tracked
+  monitors. `scripts/analyze_spa2_bg_feature.py` already does this.
+- The engine's `monitor_probabilities_final` still uses tracked indices and so
+  still carries this defect; the accessors now warn, but the stored values are
+  unchanged by design. Anything reading them at `80000` steps or finer should
+  use `population(...)` instead.
+- `20000` remains comfortably converged. The step count never needed increasing;
+  raising it is what exposed the swap.
+
+Full per-cell output in `results/multitone_label_audit.json`.
+
+#### Superseded: the three questions this closed
+
+All three are answered by the audit above. Kept for the reasoning, and because
+the framing of the first one is instructive: it assumed labels are per-cell when
+the batched path shares one eigenbasis across the scan.
 
 The diagnosis above rests on **one grid cell** (`det = 0.0 MHz`, prefactor `1`),
 chosen because it was the worst in the grid. It explains that cell cleanly, but
@@ -405,18 +563,27 @@ three things are unverified:
 1. **Do the other 24 grid cells swap too, and at which step counts?** The swap
    partners seen here were `29`/`32` and `14`/`15`. Other detunings may have
    different near-degenerate pairs, or none.
-2. **Are the published SPA2 background figures affected?** `depletion` only
-   breaks if the run happens to land on the wrong side of a swap. Whether any
-   figure actually did is unknown; nothing here shows one is wrong, only that
-   the observable is capable of being wrong.
+2. **Are the published SPA2 background figures affected?** *Partly answered
+   2026-08-24.* Both saved analyses (`results/spa2_bg_rc_analysis.json` and
+   `results/spa2_right_bg_rc.json`, 363 points) were screened for the signature
+   — `depletion` jumping toward 1 while `transferred` stays put — and are clean:
+   no `depletion` is exactly `1.0`, and where it reaches `0.99999` `transferred`
+   reaches `1.0000` alongside it, so the population really did leave. The only
+   nonzero `|depletion - transferred|` gaps are in the `zy` family at *low*
+   depletion (`0.31` vs `0.24`), smooth across the family rather than a
+   single-point discontinuity, which reads as leakage into unmonitored states.
+   This is a screen, not a proof: it would miss a swap of a population
+   comparable to that leakage. The 5x5 multitone grid is a different set of runs
+   and remains unchecked.
 3. **Is `transferred` as safe as it looked?** It was stable to `5.3e-03` here,
    but it reads index `35` directly and would break if `34`/`35` ever swapped.
    That pair happened not to swap in this cell.
 
 How to check: rerun the grid and, instead of comparing `probabilities_final`
-elementwise, compare the two reduced observables and the sums over each
-near-degenerate group. A swap shows up as a large elementwise difference with a
-stable group sum, which is the signature already seen. The saved arrays from
+elementwise, compare `population(J=..., F1=..., F=..., mF=...)` across step
+counts. A swap shows up as a large elementwise difference with a stable
+quantum-number population, which is the signature already seen. (Do **not** use
+the group sum suggested in the superseded section above.) The saved arrays from
 this run are only for the single cell, so the grid needs rerunning:
 
 ```powershell

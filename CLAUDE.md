@@ -16,7 +16,7 @@ batched path. Python 3.11, `uv`, `src/` layout, venv at `.venv/`.
   scripts run in the project venv. The Bash tool is also available for POSIX
   syntax, but paths still contain spaces (`examples/SPA/Experimental
   verification/...`) — quote them.
-- **There are tests now** (`python -m pytest`, 20 tests, ~11 s), but still no
+- **There are tests now** (`python -m pytest`, 31 tests + 1 skipped, ~70 s), but still no
   linter. Run them after touching `src/`. They check internal consistency, so
   they will not catch a change in the underlying `centrex_tlf` Hamiltonian —
   for dependency bumps, capture reference outputs before and diff after.

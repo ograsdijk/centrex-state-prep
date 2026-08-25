@@ -29,7 +29,135 @@ from state_prep.approximate_states import (  # noqa: E402
 from state_prep.intensity_profiles import BackgroundField  # noqa: E402
 from state_prep.microwaves import MicrowaveField, Polarization  # noqa: E402
 from state_prep.simulator import Simulator  # noqa: E402
-from state_prep.utils import calculate_transition_frequency, find_max_overlap_idx, vector_to_state  # noqa: E402
+from state_prep.utils import (  # noqa: E402
+    calculate_transition_frequency,
+    eigenstate_quantum_numbers,
+    find_max_overlap_idx,
+    select_eigenstate,
+    vector_to_state,
+)
+
+
+# --- Identifying the final state -------------------------------------------
+#
+# `probabilities_final[:, :, k]` is the population in `V_fin[:, k]`, the
+# reordered *final-time* eigenbasis (simulator.py: `overlaps = psis_batch @
+# last_evecs.conj()`). `reorder_evecs` permutes the probability columns and
+# `V_fin`'s columns together, so that pairing is always correct. What is not
+# correct is indexing the final array with an index derived from `V_ini`:
+# that assumes the adiabatic label was carried faithfully across every
+# timestep.
+#
+# It is not. The initial state has an avoided crossing with its F=1 partner at
+# t/T ~ 0.691 with a minimum gap of 3.2 Hz, traversed essentially diabatically
+# (Landau-Zener P_diabatic = 0.999997) while the overlap matching in
+# `reorder_evecs` labels it adiabatically. Whether a timestep lands inside that
+# gap decides which branch the *label* follows, so finer stepping makes a
+# mislabel more likely -- which is why N_steps=160000 is the outlier in the
+# ladder in IMPROVEMENTS.md while 10000/40000/80000 agree. When it mislabels,
+# `1 - P[initial, idx]` reads exactly 1.000000 instead of ~0.90: saturated at
+# the most favourable value the observable can produce, so it does not look
+# like an error.
+#
+# mF = mJ + m1 + m2 is exact in this basis at all times (spread 0.000 to
+# machine precision), so it is used here to validate the tracked index. F is
+# only a good quantum number once the Stark field has ramped off -- the
+# approximate "triplet" states are Stark mixtures with F = 2.372 +- 4.899 --
+# so F is reported with its spread rather than trusted.
+#
+# Nothing is summed over. The degenerate group at readout is the F=2 mF
+# multiplet, and those sublevels are physically distinct (different selection
+# rules, and a field applied at detection splits them), so the full resolved
+# distribution is stored and any coarse-graining is left to the reader.
+
+
+_READOUT_IDENTITY_CACHE: dict[tuple[str, int], dict[str, Any]] = {}
+
+
+def readout_identity(
+    setup: dict[str, Any],
+    approximate_state: Any,
+    *,
+    n_steps: int = 10000,
+) -> dict[str, Any]:
+    """Quantum numbers of the state `approximate_state` has become at readout.
+
+    The Stark field ramps off over the trajectory, so a state that starts as a
+    Stark mixture with no good F ends as a definite-F state. *Which* one is
+    physics, not bookkeeping, so it is determined by propagating the DC fields
+    with the microwaves switched off rather than by trusting an adiabatic label.
+
+    Measured for the SPA2 initial state: F=2, mF=0 holds 0.99999 of the
+    population at every N_steps from 2000 to 160000, while the eigenstate
+    *index* of that state moves from 14 to 15 at 160000. The identity is stable;
+    the index is not. That is the whole reason this function exists.
+
+    Cached because `scan_case` rebuilds an identical setup for every case, and
+    the connection depends only on the trajectory and the DC fields.
+    """
+    key = (repr(approximate_state), n_steps)
+    if key in _READOUT_IDENTITY_CACHE:
+        return _READOUT_IDENTITY_CACHE[key]
+
+    simulator = Simulator(
+        setup["trajectory"],
+        setup["electric_field"],
+        setup["magnetic_field"],
+        [approximate_state],
+        setup["hamiltonian"],
+        None,
+    )
+    reference = simulator.run(
+        N_steps=n_steps,
+        store_probabilities=False,
+        store_final_probabilities=True,
+        store_monitor_probabilities=False,
+        store_final_monitor_probabilities=False,
+        progress=False,
+    )
+    populations = reference.probabilities_final[0]
+    index = int(np.argmax(populations))
+    table = eigenstate_quantum_numbers(reference.V_fin, setup["hamiltonian"].QN)
+    identity = {
+        "J": float(table["J"][index]),
+        "F1": float(table["F1"][index]),
+        "F": float(table["F"][index]),
+        "mF": float(table["mF"][index]),
+        "population": float(populations[index]),
+        "reference_index": index,
+        "reference_n_steps": n_steps,
+    }
+    _READOUT_IDENTITY_CACHE[key] = identity
+    return identity
+
+
+def tracking_report(
+    label: str,
+    tracked_index: int,
+    selected_index: int,
+    table: dict[str, np.ndarray],
+    identity: dict[str, Any],
+) -> dict[str, Any]:
+    """Whether the old `V_ini`-derived index still names the right state.
+
+    Purely diagnostic -- the observables use `selected_index` regardless. A
+    False here means this run is one that the previous index-based analysis
+    would have got wrong, which is what makes it worth recording per case.
+    """
+    agrees = int(tracked_index) == int(selected_index)
+    return {
+        "label": label,
+        "tracked_index_agrees": bool(agrees),
+        "tracked_index": int(tracked_index),
+        "selected_index": int(selected_index),
+        "identity": identity,
+        "tracked_index_quantum_numbers": {
+            "J": float(table["J"][tracked_index]),
+            "F1": float(table["F1"][tracked_index]),
+            "F": float(table["F"][tracked_index]),
+            "mF": float(table["mF"][tracked_index]),
+        },
+    }
 
 
 def make_bg_field(setup: dict[str, Any], *, polarization: str, region: str, bg_fraction: float):
@@ -251,18 +379,49 @@ def scan_case(
 
     qn = setup["hamiltonian"].QN
     initial_idx = 2
-    init_eigen_idx = find_max_overlap_idx(setup["initial_states"][initial_idx].state_vector(qn), result.V_ini)
-    target_idx = find_max_overlap_idx(J2_triplet_0.state_vector(qn), result.V_ini)
-    depletion = 1 - result.probabilities_final[:, initial_idx, init_eigen_idx]
-    target = result.probabilities_final[:, initial_idx, target_idx]
-    monitors = result.monitor_probabilities_final[:, initial_idx, :]
+    initial_state = setup["initial_states"][initial_idx]
+
+    # `probabilities_final[:, :, k]` is the population in `V_fin[:, k]`, so the
+    # states are identified there by quantum numbers rather than by an index
+    # carried from `V_ini` through every timestep. See the note above the
+    # helpers for why that index is not reliable.
+    final_qn = eigenstate_quantum_numbers(result.V_fin, qn)
+    initial_identity = readout_identity(setup, initial_state)
+    target_identity = readout_identity(setup, J2_triplet_0)
+    monitor_identities = [readout_identity(setup, state) for state in setup["monitor_states"]]
+
+    init_eigen_idx = select_eigenstate(final_qn, initial_identity)
+    target_idx = select_eigenstate(final_qn, target_identity)
+    monitor_indices = [select_eigenstate(final_qn, identity) for identity in monitor_identities]
+
+    populations = result.probabilities_final[:, initial_idx, :]
+    depletion = 1 - populations[:, init_eigen_idx]
+    target = populations[:, target_idx]
+    monitors = populations[:, monitor_indices]
     transferred = target + monitors.sum(axis=1)
 
+    # What the previous index-based analysis would have used. Kept so that a
+    # case it would have got wrong shows up in the output instead of being
+    # silently corrected -- `tracked_index_agrees: false` marks such a case.
+    identification = {
+        "initial": tracking_report(
+            "initial",
+            find_max_overlap_idx(initial_state.state_vector(qn), result.V_ini),
+            init_eigen_idx,
+            final_qn,
+            initial_identity,
+        ),
+        "target": tracking_report(
+            "target",
+            find_max_overlap_idx(J2_triplet_0.state_vector(qn), result.V_ini),
+            target_idx,
+            final_qn,
+            target_identity,
+        ),
+    }
+    monitors_tracked = result.monitor_probabilities_final[:, initial_idx, :]
+
     peak_idx = int(np.argmax(np.where(detunings_hz > 0, depletion, -np.inf)))
-    monitor_indices = [
-        find_max_overlap_idx(state.state_vector(qn), result.V_ini)
-        for state in setup["monitor_states"]
-    ]
 
     case_name = "no_bg" if polarization is None else f"{polarization}_{region}"
     if include_rc_bg:
@@ -320,6 +479,21 @@ def scan_case(
         "target": target.tolist(),
         "transferred": transferred.tolist(),
         "monitor_probabilities": monitors.tolist(),
+        # The complete final-state distribution, with the axis labelled by good
+        # quantum numbers rather than by an index. Nothing is summed over: the
+        # F=2 mF sublevels are degenerate at readout only because the field has
+        # ramped off, and a field applied at detection separates them.
+        "final_populations": result.probabilities_final[:, initial_idx, :].tolist(),
+        "final_quantum_numbers": {
+            key: values.tolist() for key, values in final_qn.items()
+        },
+        # The engine's own adiabatically-tracked monitor populations, kept for
+        # comparison: they use the same tracking this analysis no longer relies
+        # on, so a difference localises the defect rather than hiding it.
+        "monitor_probabilities_tracked": monitors_tracked.tolist(),
+        "monitor_indices": [int(index) for index in monitor_indices],
+        "monitor_identities": monitor_identities,
+        "state_identification": identification,
         "positive_peak_detuning_mhz": float(detunings_hz[peak_idx] / 1e6),
         "positive_peak_depletion": float(depletion[peak_idx]),
         "positive_peak_target": float(target[peak_idx]),

@@ -12,7 +12,21 @@ def reorder_evecs_batched(
 ) -> Tuple[Any, Any]:
     """Reorder eigenvectors/energies to maximize overlap with a reference.
 
-    Matches `state_prep.utils.reorder_evecs` but works for batched matrices.
+    Mirrors `state_prep.utils.reorder_evecs` for batched matrices, but **not its
+    algorithm**: this matches greedily with `argmax`, while the CPU path solves
+    an optimal one-to-one assignment. Greedy matching does not guarantee a
+    permutation -- when two input eigenvectors have their largest overlap with
+    the same reference column, which happens once states mix strongly, one
+    reference column is claimed twice and the subsequent `argsort` produces an
+    arbitrary ordering rather than a matching. GPU labels can therefore differ
+    from CPU labels for the same trajectory.
+
+    This is left as-is deliberately: there is no CuPy `linear_sum_assignment`, so
+    fixing it needs a host round-trip or a batched auction kernel, and the labels
+    it produces should not be load-bearing in the first place. Identify states by
+    quantum numbers instead -- `state_prep.utils.eigenstate_quantum_numbers` with
+    `select_eigenstate`, or `result.population(...)` -- which is immune to
+    labelling entirely. See the crossing analysis in `IMPROVEMENTS.md`.
 
     Parameters
     ----------

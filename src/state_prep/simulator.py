@@ -1,3 +1,4 @@
+import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +18,14 @@ from .hamiltonians import Hamiltonian
 from .magnetic_fields import MagneticField
 from .microwaves import MicrowaveField, build_rotating_frame_shift
 from .trajectory import Trajectory
-from .utils import find_max_overlap_idx, reorder_evecs, vector_to_state
+from .utils import (
+    LabelGapTracker,
+    eigenstate_quantum_numbers,
+    find_max_overlap_idx,
+    reorder_evecs,
+    select_eigenstate,
+    vector_to_state,
+)
 
 
 @contextmanager
@@ -78,6 +86,8 @@ class SimulationResult:
     monitor_states: Optional[List[centrex_tlf.states.UncoupledState]] = None
     monitor_probabilities: Optional[np.ndarray] = None
     monitor_probabilities_final: Optional[np.ndarray] = None
+    # Diagnostic from LabelGapTracker; see `unreliable_labels`.
+    label_gaps: Optional[dict] = None
 
     def __post_init__(self):
         # Generate array of positions
@@ -156,6 +166,9 @@ class SimulationResult:
         index_state = find_max_overlap_idx(
             state.state_vector(self.hamiltonian.QN), self.V_ini
         )
+        self._check_tracked_index(
+            index_state, "get_state_probability", state.state_vector(self.hamiltonian.QN)
+        )
 
         if self.probabilities is not None:
             return self.probabilities[:, index_ini, index_state]
@@ -231,6 +244,15 @@ class SimulationResult:
             raise ValueError("monitor_state not found in result.monitor_states") from e
 
         index_ini = self._resolve_initial_state_index(initial_state)
+
+        # The engine derives monitor_idx from V_ini the same way; recompute it so
+        # the same t=0-index-on-t=T-data problem can be checked for here too.
+        monitor_vector = monitor_state.state_vector(self.hamiltonian.QN)
+        self._check_tracked_index(
+            find_max_overlap_idx(monitor_vector, self.V_ini),
+            "get_monitor_probability",
+            monitor_vector,
+        )
 
         if self.monitor_probabilities is not None:
             return self.monitor_probabilities[:, index_ini, mon_i]
@@ -314,6 +336,19 @@ class SimulationResult:
 
         return energies
 
+    # A `get_state_energy_diabatic` used to be stubbed out here, backed by
+    # `reorder_evecs(V, D, V_ref_ini)` -- matching each step against the t=0
+    # eigenvectors rather than the previous step's. That is not diabatic
+    # following, and it was removed rather than implemented: it is only
+    # meaningful while the eigenvectors barely rotate, and here they rotate
+    # completely. The SPA2 initial state is a Stark mixture at t=0 (F = 2.372
+    # +- 4.899) and a pure F=2 state once the field is off, so overlaps with the
+    # t=0 basis become meaningless well away from any crossing.
+    #
+    # The genuinely diabatic object is the propagated wavefunction, which is
+    # already stored: project it onto the final eigenvectors and identify those
+    # by quantum numbers with `population(...)`.
+
     def get_state_energy(self, state: centrex_tlf.states.UncoupledState) -> np.ndarray:
         """
         Gets the energy of state for all values in t_array.
@@ -330,16 +365,153 @@ class SimulationResult:
 
         return self.energies[:, index_state]
 
-    def get_state_energy_diabatic(
-        self, state: centrex_tlf.states.UncoupledState
-    ) -> np.array:
-        """
-        Gets the energy of state that is closes to provided state at each time step.
+    def final_quantum_numbers(self) -> dict:
+        """(J, F1, F, mF) and their spreads for every column of `V_fin`.
 
-        Corresponds (somewhat) to diabatic following of eigenstates
+        `probabilities_final[..., k]` is the population in `V_fin[:, k]`, so this
+        labels that axis by what the states physically are. See
+        `state_prep.utils.eigenstate_quantum_numbers` for why the spreads matter.
         """
-        raise NotImplementedError(
-            "Diabatic energies are not stored on SimulationResult in this version."
+        return eigenstate_quantum_numbers(self.V_fin, self.hamiltonian.QN)
+
+    def population(self, *, tolerance: float = 1e-3, **identity) -> np.ndarray:
+        """Final population of the state with the given quantum numbers.
+
+        Accepts any subset of `J`, `F1`, `F`, `mF`, e.g.
+        ``result.population(J=1, F1=1.5, F=2, mF=0)``. Returns one value per
+        initial state.
+
+        Prefer this over `get_state_probability` when the answer matters: that
+        method resolves the state through an index taken at t=0, which is only
+        valid if the adiabatic label survived the whole trajectory. This reads
+        the final eigenvectors directly and so cannot be fooled by a label swap
+        at a crossing.
+        """
+        if self.probabilities_final is None:
+            raise ValueError(
+                "No final probabilities stored. Re-run with store_final_probabilities=True."
+            )
+        index = select_eigenstate(
+            self.final_quantum_numbers(), identity, tolerance=tolerance
+        )
+        return self.probabilities_final[:, index]
+
+    def unreliable_labels(self, max_gap_hz: Optional[float] = None) -> dict:
+        """Tracked eigenstate labels that crossed another level during the trajectory.
+
+        Returns ``{index: {"crossings", "gap_hz", "at_time_s"}}`` for every label
+        whose energy rank changed at least once, optionally restricted to those
+        whose closest crossing was below `max_gap_hz`.
+
+        A label listed here is not necessarily wrong, but it cannot be assumed
+        right: at a crossing the population follows its diabatic branch while the
+        adiabatic label follows the other, so the index may no longer name the
+        state you meant. Identify such states with `population(...)` instead,
+        which reads the final eigenvectors rather than a carried index.
+
+        On the SPA2 setup this lists most of the basis, because the Stark
+        ramp-down folds the hyperfine structure together and produces crossings
+        in bulk. That is the honest answer: adiabatic labels here are broadly
+        unreliable, not exceptionally so.
+        """
+        if self.label_gaps is None:
+            return {}
+
+        crossings = self.label_gaps["crossings"]
+        gaps = self.label_gaps["crossing_gap_hz"]
+        selected = crossings > 0
+        if max_gap_hz is not None:
+            selected &= gaps < max_gap_hz
+
+        return {
+            int(index): {
+                "crossings": int(crossings[index]),
+                "gap_hz": float(gaps[index]),
+                "at_time_s": float(self.label_gaps["crossing_time_s"][index]),
+            }
+            for index in np.flatnonzero(selected)
+        }
+
+    def _tracked_mF(self, vector: np.ndarray) -> float:
+        """<mF> of a state vector. mF = mJ + m1 + m2 is exact in this basis."""
+        mF = np.array([q.mJ + q.m1 + q.m2 for q in self.hamiltonian.QN], dtype=float)
+        weights = np.abs(np.asarray(vector, dtype=complex)) ** 2
+        return float(weights @ mF / weights.sum())
+
+    def _check_tracked_index(
+        self,
+        index: int,
+        what: str,
+        reference_vector: Optional[np.ndarray] = None,
+    ) -> None:
+        """Check a `V_ini`-derived index before it is used against final-time data.
+
+        Two checks, strongest first. mF is exactly conserved here, so a tracked
+        label whose final-time mF differs from the reference state's has
+        definitely moved to a different state -- that is reported unconditionally.
+        Otherwise, if the label crossed another level the answer merely *may* be
+        wrong, which is reported once per result to avoid noise.
+        """
+        if reference_vector is not None and self.V_fin is not None:
+            expected = self._tracked_mF(reference_vector)
+            actual = self._tracked_mF(self.V_fin[:, index])
+            if abs(expected - actual) > 1e-6:
+                warnings.warn(
+                    f"{what} resolves to tracked eigenstate {index}, which has "
+                    f"mF={actual:+g} at the final time but the requested state has "
+                    f"mF={expected:+g}. mF is exactly conserved, so the adiabatic label "
+                    f"has definitely followed a different state and this value is wrong. "
+                    f"Use population(...) with quantum numbers instead.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+                return
+
+        if getattr(self, "_crossing_warning_issued", False):
+            return
+        flagged = self.unreliable_labels()
+        if int(index) not in flagged:
+            return
+        detail = flagged[int(index)]
+        object.__setattr__(self, "_crossing_warning_issued", True)
+        warnings.warn(
+            f"{what} resolves to tracked eigenstate {index}, which changed energy rank "
+            f"{detail['crossings']} time(s), passing within {detail['gap_hz']:.3g} Hz of "
+            f"another level at t={detail['at_time_s']:.4g} s. At such a crossing the "
+            f"population follows its diabatic branch while the adiabatic label follows "
+            f"the other, so this index may not name the state you meant "
+            f"({len(flagged)} of {self.label_gaps['crossings'].size} labels cross). "
+            f"Identify states with population(...) and quantum numbers instead. "
+            f"This warning is issued once per result.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+    def _warn_if_unreliable(self, index: int, what: str) -> None:
+        """Warn once per result when a tracked label is used and crossings occurred.
+
+        Warns once rather than per call, and reports the population-wide count
+        rather than only this label: crossings here are pervasive, so a per-label
+        warning on every access would be noise.
+        """
+        if getattr(self, "_crossing_warning_issued", False):
+            return
+        flagged = self.unreliable_labels()
+        if int(index) not in flagged:
+            return
+        detail = flagged[int(index)]
+        object.__setattr__(self, "_crossing_warning_issued", True)
+        warnings.warn(
+            f"{what} resolves to tracked eigenstate {index}, which changed energy rank "
+            f"{detail['crossings']} time(s), passing within {detail['gap_hz']:.3g} Hz of "
+            f"another level at t={detail['at_time_s']:.4g} s. At such a crossing the "
+            f"population follows its diabatic branch while the adiabatic label follows "
+            f"the other, so this index may not name the state you meant "
+            f"({len(flagged)} of {self.label_gaps['crossings'].size} labels cross). "
+            f"Identify states with population(...) and quantum numbers instead. "
+            f"This warning is issued once per result.",
+            UserWarning,
+            stacklevel=3,
         )
 
     def save_to_pickle(self, path: Path) -> None:
@@ -371,6 +543,8 @@ class MicrowaveScanResult:
     monitor_probabilities_final: Optional[np.ndarray] = None
     V_ini: Optional[np.ndarray] = None
     V_fin: Optional[np.ndarray] = None
+    # Diagnostic from LabelGapTracker; see `unreliable_labels`.
+    label_gaps: Optional[dict] = None
 
     @property
     def batch_size(self) -> int:
@@ -426,6 +600,9 @@ class MicrowaveScanResult:
         idx_state = find_max_overlap_idx(
             state.state_vector(self.hamiltonian.QN), self.V_ini
         )
+        self._check_tracked_index(
+            idx_state, "get_state_probability", state.state_vector(self.hamiltonian.QN)
+        )
         return self.probabilities_final[:, idx_ini, idx_state]
 
     def get_monitor_probability(
@@ -445,6 +622,15 @@ class MicrowaveScanResult:
         idx_ini = self._initial_state_index(initial_state)
         for idx, monitored in enumerate(self.monitor_states):
             if monitored is state or monitored == state:
+                # The engine derives monitor_idx from V_ini the same way; recompute
+                # it so the same t=0-index-on-t=T-data problem is checked here too.
+                if self.V_ini is not None:
+                    monitor_vector = state.state_vector(self.hamiltonian.QN)
+                    self._check_tracked_index(
+                        find_max_overlap_idx(monitor_vector, self.V_ini),
+                        "get_monitor_probability",
+                        monitor_vector,
+                    )
                 return self.monitor_probabilities_final[:, idx_ini, idx]
         raise ValueError("state is not among monitor_states for this result.")
 
@@ -502,6 +688,161 @@ class MicrowaveScanResult:
         for idx in range(self.monitor_probabilities_final.shape[2]):
             data[f"monitor_{idx}"] = self.monitor_probabilities_final[:, idx_ini, idx]
         return pl.DataFrame(data)
+
+    def final_quantum_numbers(self) -> dict:
+        """(J, F1, F, mF) and their spreads for every column of `V_fin`.
+
+        `probabilities_final[:, :, k]` is the population in `V_fin[:, k]`, so this
+        labels that axis by what the states physically are.
+        """
+        if self.V_fin is None:
+            raise ValueError("V_fin is required to compute quantum numbers.")
+        return eigenstate_quantum_numbers(self.V_fin, self.hamiltonian.QN)
+
+    def population(
+        self,
+        initial_state: centrex_tlf.states.State,
+        *,
+        tolerance: float = 1e-3,
+        **identity,
+    ) -> np.ndarray:
+        """Final population of the state with the given quantum numbers.
+
+        Accepts any subset of `J`, `F1`, `F`, `mF`, e.g.
+        ``result.population(ini, J=1, F1=1.5, F=2, mF=0)``. Returns one value per
+        scan point.
+
+        Prefer this over `get_state_probability`, which resolves the state
+        through an index taken at t=0 and is therefore only valid if the
+        adiabatic label survived the trajectory.
+        """
+        if self.probabilities_final is None:
+            raise ValueError(
+                "No probabilities stored. Re-run with store_final_probabilities=True."
+            )
+        idx_ini = self._initial_state_index(initial_state)
+        index = select_eigenstate(
+            self.final_quantum_numbers(), identity, tolerance=tolerance
+        )
+        return self.probabilities_final[:, idx_ini, index]
+
+    def unreliable_labels(self, max_gap_hz: Optional[float] = None) -> dict:
+        """Tracked eigenstate labels that crossed another level during the trajectory.
+
+        Returns ``{index: {"crossings", "gap_hz", "at_time_s"}}`` for every label
+        whose energy rank changed at least once, optionally restricted to those
+        whose closest crossing was below `max_gap_hz`.
+
+        A label listed here is not necessarily wrong, but it cannot be assumed
+        right: at a crossing the population follows its diabatic branch while the
+        adiabatic label follows the other, so the index may no longer name the
+        state you meant. Identify such states with `population(...)` instead,
+        which reads the final eigenvectors rather than a carried index.
+
+        On the SPA2 setup this lists most of the basis, because the Stark
+        ramp-down folds the hyperfine structure together and produces crossings
+        in bulk. That is the honest answer: adiabatic labels here are broadly
+        unreliable, not exceptionally so.
+        """
+        if self.label_gaps is None:
+            return {}
+
+        crossings = self.label_gaps["crossings"]
+        gaps = self.label_gaps["crossing_gap_hz"]
+        selected = crossings > 0
+        if max_gap_hz is not None:
+            selected &= gaps < max_gap_hz
+
+        return {
+            int(index): {
+                "crossings": int(crossings[index]),
+                "gap_hz": float(gaps[index]),
+                "at_time_s": float(self.label_gaps["crossing_time_s"][index]),
+            }
+            for index in np.flatnonzero(selected)
+        }
+
+    def _tracked_mF(self, vector: np.ndarray) -> float:
+        """<mF> of a state vector. mF = mJ + m1 + m2 is exact in this basis."""
+        mF = np.array([q.mJ + q.m1 + q.m2 for q in self.hamiltonian.QN], dtype=float)
+        weights = np.abs(np.asarray(vector, dtype=complex)) ** 2
+        return float(weights @ mF / weights.sum())
+
+    def _check_tracked_index(
+        self,
+        index: int,
+        what: str,
+        reference_vector: Optional[np.ndarray] = None,
+    ) -> None:
+        """Check a `V_ini`-derived index before it is used against final-time data.
+
+        Two checks, strongest first. mF is exactly conserved here, so a tracked
+        label whose final-time mF differs from the reference state's has
+        definitely moved to a different state -- that is reported unconditionally.
+        Otherwise, if the label crossed another level the answer merely *may* be
+        wrong, which is reported once per result to avoid noise.
+        """
+        if reference_vector is not None and self.V_fin is not None:
+            expected = self._tracked_mF(reference_vector)
+            actual = self._tracked_mF(self.V_fin[:, index])
+            if abs(expected - actual) > 1e-6:
+                warnings.warn(
+                    f"{what} resolves to tracked eigenstate {index}, which has "
+                    f"mF={actual:+g} at the final time but the requested state has "
+                    f"mF={expected:+g}. mF is exactly conserved, so the adiabatic label "
+                    f"has definitely followed a different state and this value is wrong. "
+                    f"Use population(...) with quantum numbers instead.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+                return
+
+        if getattr(self, "_crossing_warning_issued", False):
+            return
+        flagged = self.unreliable_labels()
+        if int(index) not in flagged:
+            return
+        detail = flagged[int(index)]
+        object.__setattr__(self, "_crossing_warning_issued", True)
+        warnings.warn(
+            f"{what} resolves to tracked eigenstate {index}, which changed energy rank "
+            f"{detail['crossings']} time(s), passing within {detail['gap_hz']:.3g} Hz of "
+            f"another level at t={detail['at_time_s']:.4g} s. At such a crossing the "
+            f"population follows its diabatic branch while the adiabatic label follows "
+            f"the other, so this index may not name the state you meant "
+            f"({len(flagged)} of {self.label_gaps['crossings'].size} labels cross). "
+            f"Identify states with population(...) and quantum numbers instead. "
+            f"This warning is issued once per result.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+    def _warn_if_unreliable(self, index: int, what: str) -> None:
+        """Warn once per result when a tracked label is used and crossings occurred.
+
+        Warns once rather than per call, and reports the population-wide count
+        rather than only this label: crossings here are pervasive, so a per-label
+        warning on every access would be noise.
+        """
+        if getattr(self, "_crossing_warning_issued", False):
+            return
+        flagged = self.unreliable_labels()
+        if int(index) not in flagged:
+            return
+        detail = flagged[int(index)]
+        object.__setattr__(self, "_crossing_warning_issued", True)
+        warnings.warn(
+            f"{what} resolves to tracked eigenstate {index}, which changed energy rank "
+            f"{detail['crossings']} time(s), passing within {detail['gap_hz']:.3g} Hz of "
+            f"another level at t={detail['at_time_s']:.4g} s. At such a crossing the "
+            f"population follows its diabatic branch while the adiabatic label follows "
+            f"the other, so this index may not name the state you meant "
+            f"({len(flagged)} of {self.label_gaps['crossings'].size} labels cross). "
+            f"Identify states with population(...) and quantum numbers instead. "
+            f"This warning is issued once per result.",
+            UserWarning,
+            stacklevel=3,
+        )
 
     def save_to_pickle(self, path: Path) -> None:
         """Serialise with dill, which handles the callables stored on fields."""
@@ -706,6 +1047,7 @@ class Simulator:
             monitor_probabilities_final=monitor_probabilities_final,
             V_ini=V_ini,
             V_fin=V_fin,
+            label_gaps=getattr(self, "_label_gaps", None),
         )
 
         return result
@@ -999,6 +1341,7 @@ class Simulator:
             monitor_probabilities_final=monitor_probabilities_final,
             V_ini=V_ini,
             V_fin=V_fin,
+            label_gaps=getattr(self, "_label_gaps", None),
         )
 
     def _run_microwave_scan_parallel_loky(
@@ -1085,6 +1428,7 @@ class Simulator:
             monitor_probabilities_final=monitor_probabilities_final,
             V_ini=first.V_ini,
             V_fin=first.V_fin,
+            label_gaps=first.label_gaps,
         )
 
     def _time_evolve_mu_batched_shared_slow(
@@ -1153,6 +1497,7 @@ class Simulator:
         psis_batch = np.repeat(self.psis[None, :, :], batch, axis=0)
 
         last_evecs = V_ref
+        gap_tracker = LabelGapTracker(len(self.hamiltonian.QN))
         for i, t in enumerate(tqdm(t_array[:-1], disable=not progress)):
             dt = t_array[i + 1] - t_array[i]
 
@@ -1171,6 +1516,7 @@ class Simulator:
             Es, evecs = D, V
             Es, evecs = reorder_evecs(evecs, Es, V_ref)
             last_evecs = evecs
+            gap_tracker.update(Es, t)
 
             # Pre-rotate each microwave field into the slow-eigenbasis (shared across batch)
             Vh = V.conj().T
@@ -1224,6 +1570,7 @@ class Simulator:
             amps = psis_batch @ last_evecs[:, monitor_idx].conj()
             monitor_probabilities_final = np.abs(amps) ** 2
 
+        self._label_gaps = gap_tracker.summary(self.trajectory.get_T())
         return psis_batch, probabilities_final, monitor_probabilities_final, V_ref_ini, V_ref
 
     def _time_evolve_mu_batched_shared_slow_multitone(
@@ -1286,6 +1633,7 @@ class Simulator:
         psis_batch = np.repeat(self.psis[None, :, :], batch, axis=0)
 
         last_evecs = V_ref
+        gap_tracker = LabelGapTracker(len(self.hamiltonian.QN))
         for i, t in enumerate(tqdm(t_array[:-1], disable=not progress)):
             dt = t_array[i + 1] - t_array[i]
 
@@ -1302,6 +1650,7 @@ class Simulator:
             Es, evecs = D, V
             Es, evecs = reorder_evecs(evecs, Es, V_ref)
             last_evecs = evecs
+            gap_tracker.update(Es, t)
 
             Vh = V.conj().T
             upper_rot: list[np.ndarray] = []
@@ -1366,6 +1715,7 @@ class Simulator:
             amps = psis_batch @ last_evecs[:, monitor_idx].conj()
             monitor_probabilities_final = np.abs(amps) ** 2
 
+        self._label_gaps = gap_tracker.summary(self.trajectory.get_T())
         return psis_batch, probabilities_final, monitor_probabilities_final, V_ref_ini, V_ref
 
     def _time_evolve(
@@ -1436,6 +1786,7 @@ class Simulator:
 
         out_i = 0
         last_evecs = V_ref
+        gap_tracker = LabelGapTracker(len(self.hamiltonian.QN))
         for i, t in enumerate(tqdm(t_array[:-1], disable=not progress)):
             # Calculate the timestep
             dt = t_array[i + 1] - t_array[i]
@@ -1455,8 +1806,8 @@ class Simulator:
 
             # Reorder eigenvectors and energies
             Es, evecs = reorder_evecs(V, D, V_ref)
-            # Es_diabatic, _ = reorder_evecs(V, D, V_ref_ini)
             last_evecs = evecs
+            gap_tracker.update(Es, t)
 
             # Apply propagator without forming U_dt:
             # For row-vector storage (each state is a row), the update is
@@ -1494,6 +1845,7 @@ class Simulator:
         if store_final_probabilities:
             probabilities_final = self.calculate_probabilities(self.psis, last_evecs)
 
+        self._label_gaps = gap_tracker.summary(self.trajectory.get_T())
         return (
             psis_t,
             energies,
@@ -1578,6 +1930,7 @@ class Simulator:
 
         out_i = 0
         last_evecs = V_ref
+        gap_tracker = LabelGapTracker(len(self.hamiltonian.QN))
         for i, t in enumerate(tqdm(t_array[:-1], disable=not progress)):
             # Calculate the timestep
             dt = t_array[i + 1] - t_array[i]
@@ -1623,6 +1976,7 @@ class Simulator:
             Es, evecs = D, V
             Es, evecs = reorder_evecs(evecs, Es, V_ref)
             last_evecs = evecs
+            gap_tracker.update(Es, t)
 
             # Compute the propagator
             # Combine the unitary matrices
@@ -1662,6 +2016,7 @@ class Simulator:
             amps = self.psis @ last_evecs[:, monitor_idx].conj()
             monitor_probabilities_final = np.abs(amps) ** 2
 
+        self._label_gaps = gap_tracker.summary(self.trajectory.get_T())
         return (
             psis_t,
             energies,

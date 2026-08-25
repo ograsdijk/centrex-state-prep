@@ -84,10 +84,13 @@ from .simulator import (
 )
 from .trajectory import Trajectory
 from .utils import (
+    LabelGapTracker,
     calculate_transition_frequency,
+    eigenstate_quantum_numbers,
     find_max_overlap_idx,
     matrix_to_states,
     reorder_evecs,
+    select_eigenstate,
     vector_to_state,
 )
 
@@ -134,6 +137,10 @@ __all__ = [
     "vector_to_state",
     "matrix_to_states",
     "calculate_transition_frequency",
+    # identifying eigenstates by quantum numbers rather than by tracked index
+    "eigenstate_quantum_numbers",
+    "select_eigenstate",
+    "LabelGapTracker",
     # approximate states
     "J0_singlet",
     "J0_triplet_0",

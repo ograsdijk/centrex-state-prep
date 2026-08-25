@@ -39,7 +39,7 @@ NVIDIA pip wheels).
 invent `ruff`/`black` invocations.
 
 ```bash
-.\.venv\Scripts\python.exe -m pytest        # 20 tests, ~11 s
+.\.venv\Scripts\python.exe -m pytest        # 31 tests + 1 skipped, ~70 s
 ```
 
 The suite covers scan agreement (shared-slow versus repeated `run()`), the
