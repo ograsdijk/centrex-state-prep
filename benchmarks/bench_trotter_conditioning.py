@@ -8,6 +8,27 @@ H_rot = H_mu_rot(t) + diag(D + D_mu)
         ^ small, dense   ^ large, diagonal
 
 Strang:  U ~ exp(-i*diag*dt/2) @ exp(-i*H_mu_rot*dt) @ exp(-i*diag*dt/2)
+
+The Strang and Lie variants were measured and rejected (IMPROVEMENTS.md
+Priority A): delta*dt is about 7.65e+04 rad per step, so splitting the large
+diagonal fails however small the coupling is.
+
+This also checks the surviving variant identified there, which does not split
+the diagonal at all. Move to the interaction picture with respect to `delta`,
+where the propagator over one step is
+
+    U = exp(-i*delta*dt) @ expm(-i * (H_mu_rot . M))
+
+with `.` the elementwise (Hadamard) product and M the analytic oscillatory
+integral
+
+    M_ij = integral_0^dt exp(i*(delta_i - delta_j)*s) ds
+         = (exp(i*(delta_i - delta_j)*dt) - 1) / (i*(delta_i - delta_j))
+
+taken as `dt` when delta_i == delta_j. That is the first Magnus term; the
+question this script answers is whether the neglected second term is small
+enough. If it is, the per-scan-point n^3 eigensolve can be replaced by
+n^2-scale work, which is the only remaining large lever on runtime.
 """
 
 from __future__ import annotations
@@ -54,6 +75,25 @@ def herm_expm(H: np.ndarray, dt: float) -> np.ndarray:
     return (W * np.exp(-1j * w * dt)[None, :]) @ W.conj().T
 
 
+def magnus_integral(delta: np.ndarray, dt: float) -> np.ndarray:
+    """Elementwise integral of exp(i*(delta_i - delta_j)*s) over s in [0, dt].
+
+    The small-argument branch is not optional: `delta` is nearly degenerate
+    within a rotational manifold, so the naive quotient divides by ~0 there and
+    the script would measure the guard rather than the physics.
+    """
+    x = delta[:, None] - delta[None, :]
+    xdt = x * dt
+    out = np.empty(x.shape, dtype=complex)
+    small = np.abs(xdt) < 1e-8
+    # expm1 keeps the difference accurate when the exponent is small but the
+    # branch below has not yet taken over.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = np.expm1(1j * xdt) / (1j * x)
+    out[small] = dt * (1.0 + 0.5j * xdt[small])
+    return out
+
+
 def analyse(n_steps: int) -> dict:
     dt = T / n_steps
     ts = np.linspace(0, T, N_SAMPLES + 2)[1:-1]
@@ -80,6 +120,11 @@ def analyse(n_steps: int) -> dict:
         phase_full = np.exp(-1j * delta * dt)
         U_lie = phase_full[:, None] * U_mid
 
+        # Interaction picture with respect to the diagonal, first Magnus term.
+        A = H_mu_rot * magnus_integral(delta, dt)
+        U_magnus = phase_full[:, None] * herm_expm(A, 1.0)
+        norm_A = float(np.linalg.norm(A, 2))
+
         rows.append(
             {
                 "t": t,
@@ -87,11 +132,14 @@ def analyse(n_steps: int) -> dict:
                 "norm_H_mu": float(np.linalg.norm(H_mu_rot, 2)),
                 "err_strang": float(np.linalg.norm(U_exact - U_strang, 2)),
                 "err_lie": float(np.linalg.norm(U_exact - U_lie, 2)),
+                "err_magnus": float(np.linalg.norm(U_exact - U_magnus, 2)),
+                "norm_magnus_arg": norm_A,
             }
         )
 
     worst = max(r["err_strang"] for r in rows)
     worst_lie = max(r["err_lie"] for r in rows)
+    worst_magnus = max(r["err_magnus"] for r in rows)
     return {
         "n_steps": n_steps,
         "dt": dt,
@@ -101,6 +149,9 @@ def analyse(n_steps: int) -> dict:
         "per_step_lie": worst_lie,
         "accum_strang": worst * n_steps,
         "accum_lie": worst_lie * n_steps,
+        "per_step_magnus": worst_magnus,
+        "accum_magnus": worst_magnus * n_steps,
+        "norm_magnus_arg": max(r["norm_magnus_arg"] for r in rows),
         "rows": rows,
     }
 
@@ -121,6 +172,11 @@ for n_steps in _args.n_steps:
         f"{'':>14}  {'':>16}  "
         f"per-step Lie   ={res['per_step_lie']:.3e}  "
         f"x N = {res['accum_lie']:.3e}"
+    )
+    print(
+        f"{'':>14}  {'':>16}  "
+        f"per-step Magnus={res['per_step_magnus']:.3e}  "
+        f"x N = {res['accum_magnus']:.3e}"
     )
 
 steps = sorted(out)
@@ -152,3 +208,30 @@ elif base["accum_strang"] < 1e-3:
     print("VERDICT: above the noise floor but possibly tolerable. Judgement call.")
 else:
     print("VERDICT: far too large at this dt. A Strang split is not usable here.")
+
+print()
+print("--- interaction picture, first Magnus term ---")
+print(f"max ||H_mu_rot . M||_2 at N_steps={steps[0]}: "
+      f"{base['norm_magnus_arg']:.4e} rad")
+print("  This is the argument that actually gets exponentiated. Unlike Strang,")
+print("  it never contains the large diagonal, so it stays small as dt shrinks.")
+if len(steps) > 1:
+    print()
+    print("per-step Magnus error scaling when dt halves "
+          "(expect ~4x if the leading neglected term is the second Magnus term):")
+    for lo, hi in zip(steps[:-1], steps[1:]):
+        lo_e = out[lo]["per_step_magnus"]
+        hi_e = out[hi]["per_step_magnus"]
+        ratio = lo_e / hi_e if hi_e > 0 else float("inf")
+        print(f"  {lo} -> {hi} : {ratio:.2f}x")
+print()
+print(f"accumulated Magnus error at N_steps={steps[0]}: "
+      f"{base['accum_magnus']:.3e}")
+if base["accum_magnus"] < 1e-6:
+    print("VERDICT: at or below the 1e-6 acceptance target. The per-scan-point")
+    print("  eigensolve can be replaced by n^2-scale work. Proceed.")
+elif base["accum_magnus"] < 1e-3:
+    print("VERDICT: above the 1e-6 target but not catastrophic. A second Magnus")
+    print("  term, or a smaller dt, would need measuring before this is usable.")
+else:
+    print("VERDICT: too large. The first Magnus term alone is not sufficient.")
