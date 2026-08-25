@@ -289,6 +289,51 @@ Findings:
   `N_steps`. A regression-test tolerance therefore cannot be a single global
   number.
 
+### Cascade Detunings Did Not Accumulate Up The Ladder — FIXED 2026-08-16
+
+`build_rotating_frame_shift` handled the *carriers* of a multi-rung cascade
+correctly and the *detunings* incorrectly. Only scans with fields on two different
+excited manifolds were affected, and no committed scan had that shape — every one
+of them puts all its fields on a single manifold (`[mf12, mf12_bg]`, both `Je=2`).
+**No existing result changes.**
+
+For a cascade J=0 -(w01)-> J=1 -(w12)-> J=2, a level carries the sum of every
+carrier below it, detunings included:
+
+```
+J=1: -(w01 + d01)
+J=2: -(w01 + d01 + w12 + d12)
+```
+
+The carriers accumulated through `omega=sum(unique_omegas)`. The detunings were
+subtracted through each group's own diagonal mask, and `generate_D` only writes
+entries with `J == Je`, so `d01` landed on J=1 and never reached J=2. The 1-2
+coupling was then left with a residual `exp(i*d01*t)` phase in the rotating frame
+instead of being static. Measured, with `f01=13.3 GHz`, `f12=26.6 GHz`,
+`d01=+1 MHz`, `d12=0`:
+
+```
+J=1 shift/2pi:  -13.301 GHz  = -(f01 + 1 MHz)   correct
+J=2 shift/2pi:  -39.900 GHz  = -(f01 + f12)     wrong, should be -39.901 GHz
+```
+
+`Simulator.run` was always right, because there the detuning goes into `muW_freq`
+via `set_frequency` and the cumulative sum picks it up. That divergence between the
+two paths is what the fix removes.
+
+The fix subtracts each group's detuning through a *cumulative* mask covering its own
+manifold and every manifold above it, mirroring the carrier sum. With a single
+frequency group the cumulative mask equals the group's own mask, which is why the
+single-manifold results are untouched. Ordering is now validated too: the
+frame-defining fields must form a chain (`Jg == prev.Je`), since `sum(unique_omegas)`
+had always assumed that silently.
+
+Covered by three tests in `tests/test_rotating_frame.py` against a new
+`cascade_setup` fixture; the load-bearing one compares a `run_microwave_scan` sweep
+of the upper rung against a loop of `Simulator.run` calls with the *lower* rung held
+off resonance. With `d01 = 0` that test passes even without the fix, which is
+precisely why this went unnoticed.
+
 ### Multitone: Adiabatic Label Swaps, Not Non-Convergence — RESOLVED 2026-08-16
 
 **This supersedes and corrects the two sections below.** An earlier reading of
