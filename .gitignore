@@ -131,3 +131,6 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Rust benchmark spike (NATIVE_PORT_INVESTIGATION.md), deliberately untracked
+rust/
