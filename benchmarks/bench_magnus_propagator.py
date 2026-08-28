@@ -75,18 +75,44 @@ def apply_expm_taylor(A: np.ndarray, psis: np.ndarray) -> np.ndarray:
 
     `psis` is (S, n) in the row-vector convention the simulator uses, so the
     propagator acts on the right transposed. Each term costs n^2*S, never n^3.
+
+    Scaling and squaring is applied when it is needed and skipped when it is not.
+    At the production operating point `||A||` is about `4.3e-02` rad and `k` is
+    `0`, so this costs nothing; a fixed 8-term series diverges once `||A||`
+    approaches `1`, and it does so *silently* -- measured against exact
+    solutions, a coupling-to-spread ratio of `5e-05` gives `||A|| ~ 1.9` and a
+    10x accuracy loss with no warning at all, and `5e-04` gives `||A|| ~ 19` and
+    an overflow to NaN. Guarding on the norm rather than trusting the operating
+    point keeps the failure impossible instead of merely unlikely.
+
+    Squaring on *vectors* means re-applying `exp(-iA/2^k)` `2^k` times rather
+    than squaring a matrix, which keeps the `n^2*S` cost.
     """
-    Bt = (-1j * A).T
-    term = psis
-    out = psis.copy()
-    for k in range(1, TAYLOR_TERMS + 1):
-        term = (term @ Bt) / k
-        out += term
+    # Frobenius, not spectral: `||A||_2 <= ||A||_F`, so it is a valid bound for
+    # scaling and squaring, and it costs `3 us` against `182 us` for the spectral
+    # norm at n=64 -- which would have eaten 43% of the 420 us eigensolve this
+    # propagator exists to avoid. A guard that costs what it saves is not a guard.
+    norm = float(np.linalg.norm(A, "fro"))
+    k = max(0, int(np.ceil(np.log2(norm / 0.5)))) if norm > 0.5 else 0
+    B = (-1j * A / (2**k)).T
+
+    out = psis
+    for _ in range(2**k):
+        term = out
+        acc = out.copy()
+        for j in range(1, TAYLOR_TERMS + 1):
+            term = (term @ B) / j
+            acc += term
+        out = acc
     return out
 
 
 def make_magnus_loop():
-    """The shipped shared-slow loop with the per-point eigensolve replaced."""
+    """The shipped shared-slow loop with the per-point eigensolve replaced.
+
+    Accepts `time_sampling` so the comparison against the shipped loop isolates
+    the propagator: both must freeze `H` at the same point in the step.
+    """
 
     def impl(
         self,
@@ -101,7 +127,11 @@ def make_magnus_loop():
         store_final_monitor_probabilities,
         progress,
         eig_backend,
+        time_sampling="mid",
     ):
+        sample_offset = 0.5 if time_sampling == "mid" else 0.0
+        if time_sampling not in ("mid", "left"):
+            raise ValueError(f"time_sampling must be 'mid' or 'left'; got {time_sampling!r}")
         batch = int(D_mu_diag_batch.shape[0])
         coupling_scales = np.asarray(coupling_scales)
         H_tini = H_slow_t(t_array[0])
@@ -135,14 +165,15 @@ def make_magnus_loop():
         last_evecs = V_ref
         for i, t in enumerate(t_array[:-1]):
             dt = t_array[i + 1] - t_array[i]
+            t_sample = t + sample_offset * dt
 
-            H_slow_i = H_slow_t(t)
+            H_slow_i = H_slow_t(t_sample)
             D, V = eig(H_slow_i)
             _, evecs = reorder_evecs(V, D, V_ref)
             last_evecs = evecs
 
             Vh = V.conj().T
-            H_mu_rot = [Vh @ H_mu_t(t) @ V for H_mu_t in muw_hams]
+            H_mu_rot = [Vh @ H_mu_t(t_sample) @ V for H_mu_t in muw_hams]
             psis_slow = psis_batch @ V.conj()
 
             for b in range(batch):

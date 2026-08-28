@@ -589,3 +589,103 @@ def result_row(case: str, status: str = "ok", **values: Any) -> dict[str, Any]:
     row = {"case": case, "status": status}
     row.update(values)
     return row
+
+
+# ---------------------------------------------------------------------------
+# Lineshape scoring
+# ---------------------------------------------------------------------------
+
+
+def align_lineshape(
+    curve: np.ndarray,
+    reference: np.ndarray,
+    detunings_khz: np.ndarray,
+    *,
+    max_shift_khz: float = 3.0,
+    samples: int = 12001,
+) -> tuple[float, float]:
+    """Best-fit detuning shift of `curve` onto `reference`, and the residual.
+
+    Comparing populations at a *fixed* detuning is ill-conditioned wherever a
+    scan point sits on a steep part of the lineshape. On the SPA2 setup
+    `d(population)/d(detuning)` reaches `6e-03` per kHz, so a sub-kHz effective
+    error reads as a `1e-03` population difference and no amount of refinement
+    makes it converge. Comparing whole lineshapes and reporting the shift
+    separates "the curve moved" from "the curve changed shape", and the residual
+    then converges cleanly where the pointwise metric oscillates.
+
+    Returns `(shift_khz, residual)`. The residual is RMS over the window after
+    alignment, so it is the part that a detuning offset cannot explain.
+    """
+    curve = np.asarray(curve, dtype=float)
+    reference = np.asarray(reference, dtype=float)
+    detunings_khz = np.asarray(detunings_khz, dtype=float)
+
+    grid = np.linspace(-max_shift_khz, max_shift_khz, int(samples))
+    errors = [
+        np.sum((np.interp(detunings_khz + shift, detunings_khz, reference) - curve) ** 2)
+        for shift in grid
+    ]
+    index = int(np.argmin(errors))
+    shift = float(grid[index])
+    if index in (0, len(grid) - 1):
+        # The optimum sat on the boundary, so the true shift is at least this
+        # large and the residual below is an overestimate. Silently returning a
+        # clipped fit would look like a converged alignment.
+        raise ValueError(
+            f"best-fit shift hit the +/-{max_shift_khz} kHz search boundary; "
+            "raise max_shift_khz"
+        )
+    aligned = np.interp(detunings_khz + shift, detunings_khz, reference)
+    return shift, float(np.sqrt(np.mean((aligned - curve) ** 2)))
+
+
+def convergence_order(coarse: np.ndarray, medium: np.ndarray, fine: np.ndarray) -> float:
+    """Observed order from a self-convergence triple at `N`, `2N`, `4N`.
+
+    `p = log2(||u(N) - u(2N)|| / ||u(2N) - u(4N)||)`. Uses no reference at all,
+    which is the point: every reference available here carries an error
+    comparable to what is being measured at large `N_steps`, and a reference
+    built from a finer run of the *same* scheme flatters that scheme through
+    correlated error structure.
+    """
+    first = float(np.linalg.norm(np.asarray(coarse) - np.asarray(medium)))
+    second = float(np.linalg.norm(np.asarray(medium) - np.asarray(fine)))
+    if second <= 0.0:
+        return float("nan")
+    return float(np.log2(first / second))
+
+
+def magnus_step_norms(muw_hams, t_array, *, coupling_scale: float = 1.0) -> np.ndarray:
+    """`||A|| = ||H_mu(t_mid)|| * dt` on each step of `t_array`.
+
+    This is the quantity that governs the interaction-picture Magnus propagator:
+    it Taylor-expands `expm(-i A)`, so its accuracy and its cost both depend on
+    `||A||`. At the SPA2 operating point `||A||` is about `0.038` rad, where a
+    short series is ample. Measured against exact solutions, a fixed eight-term
+    series loses `10x` accuracy **silently** near `||A|| ~ 1.9` and overflows to
+    NaN near `19`; scaling and squaring now handles that, at the cost of `2**k`
+    applications per step.
+
+    **Why this needs checking when a graded grid is used.** Grading stretches
+    steps -- up to `50x` uniform on SPA2 at `order=1` -- and `||A||` scales with
+    `dt`, so a long step landing where the coupling is strong drives `||A||` up.
+    Whether that happens is pure geometry: if the density peaks where the beam
+    is, the grid puts *short* steps there and `||A||` falls (measured `0.038 ->
+    0.0068` on the `engineered` model); if the density peaks elsewhere, as on
+    SPA2 where the Stark ramp dominates, the long steps land away from the beam
+    but `max ||A||` still rose from `0.044` to `0.32`.
+
+    Needs no propagation, so it is cheap enough to assert before a run rather
+    than discover afterwards.
+    """
+    t_array = np.asarray(t_array, dtype=float)
+    steps = np.diff(t_array)
+    mids = 0.5 * (t_array[:-1] + t_array[1:])
+    # Sample the coupling on a coarse probe and interpolate: it is smooth, and
+    # evaluating it per step would cost as much as the run being guarded.
+    probe = np.linspace(t_array[0], t_array[-1], min(600, mids.size))
+    norms = np.array(
+        [np.linalg.norm(sum(H(float(t)) for H in muw_hams), 2) for t in probe]
+    )
+    return np.interp(mids, probe, norms) * steps * float(coupling_scale)

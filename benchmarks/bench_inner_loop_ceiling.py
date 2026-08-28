@@ -72,6 +72,7 @@ def make_capturing(store: dict, capture_step: int):
         store_final_monitor_probabilities,
         progress,
         eig_backend,
+        time_sampling="mid",
     ):
         batch = int(D_mu_diag_batch.shape[0])
         coupling_scales = np.asarray(coupling_scales)
