@@ -1230,6 +1230,1080 @@ Potential implementation:
 This is also an ease-of-use improvement, since it removes the incentive to
 manually restructure notebooks around a single scan call.
 
+## Performance Priority E: Cheaper Timesteps
+
+**Read this section first.** What follows below it is a chronological record that
+includes conclusions later overturned. Every claim here carries the class of
+evidence behind it, because in this investigation the evidence class -- not the
+number -- was what decided whether a conclusion survived.
+
+### Evidence classes
+
+| class | meaning | trustworthy? |
+| --- | --- | --- |
+| **exact** | closed-form solution, or a fine product verified against one | yes |
+| **geometry** | a property of the grid or the fields; no propagation | yes |
+| **timing** | wall clock, interleaved, with repeats | yes |
+| **theory** | arithmetic on a measured profile | as an arithmetic bound |
+| **cross-scheme** | reference from a *different* discretisation | usually |
+| **self-referenced** | reference from a finer run of the *same* scheme | **no -- biased** |
+| **pointwise** | populations compared at a fixed detuning | **no -- slope-dominated** |
+
+Two classes produced every wrong conclusion in this document. **Self-referenced**
+comparisons flatter the scheme the reference came from: scoring against `U128`
+made graded look worse, then scoring against `G256` -- itself graded -- made it
+look `10-100x` better, and both were the same mistake with the sign flipped.
+**Pointwise** comparisons near a steep lineshape measure the slope: at
+`det=-1.0` `d(population)/d(detuning)` reaches `6e-03` per kHz, so a `0.2 kHz`
+effective error reads as `1e-03` of population and refuses to converge.
+
+### Verdicts
+
+| question | verdict | evidence |
+| --- | --- | --- |
+| Is midpoint second order? | **Yes**, `2.00` measured; left-endpoint `1.00` | exact |
+| Why does it not look that way in production? | `delta*dt >> 1` **and** non-commuting `H`: the neglected terms are time-ordering commutators carrying powers of `delta*dt`. Commuting `H` keeps order `2` at any scale | exact |
+| Is a convergence order measurable at production settings? | **No.** `delta*dt ~ 7.65e+04`; reaching `~1` needs `N ~ 7.6e+08`. Richardson is therefore unavailable, and CF4/Filon cannot be expected to deliver formal orders either | exact + theory |
+| Does midpoint help in practice? | **Yes.** On a commuting model at production `delta*dt`, left-endpoint saturates at `4e-01` with no convergence while midpoint reaches `9.0e-03` -- `45x` | exact |
+| Does a graded grid help **on SPA2**? | **No -- it loses `1.8-4.2x`.** Measured on `spa_like`, whose level motion (`4.5e-05` of the spread) matches SPA2's measured `9.8e-05`, at production `delta*dt` against a closed form | exact |
+| Does it help anywhere? | **Yes, where the active fraction is small**: `100-245x` on a sech pulse (`~3%` active). The ceiling is `1/f` for active fraction `f`; SPA2 is `63%` active, so `1.58x`, which is too little to pay for what grading gives up | exact + theory |
+| Why does it lose by so much rather than merely failing to help? | Equidistribution *works* -- it cuts the summed local error `1.7-2.2x`. But a uniform grid's leading error telescopes to a boundary term, worth `14-18x`, and grading forfeits that. Bad trade unless `1/f` clears the cancellation ratio | exact |
+| How much can grading buy at most? | `1.58x` at `p=1`, `1.39x` at `p=2` -- a bound on step *placement*, not a measured speedup | theory |
+| What does grading cost? | `+0.92%` at matched `N_steps` | timing |
+| Is the Magnus propagator faster? | **Yes**, `3.23x` at batch `25`, `1.89x` at `5`, `1.23x` at `1`; it removes the per-scan-point `O(n^3)` eigensolve so the gain grows with batch | timing |
+| Is Magnus as accurate? | **Yes** -- matches midpoint to four significant figures at production `delta*dt`, on two models, at every step count | exact |
+| Does a graded grid break Magnus? | **No.** Identical to midpoint on every grid. But `||A|| = ||H_mu||*dt` rises with grading when the beam sits away from the density peak (`0.044 -> 0.32` on SPA2), and the Taylor guard trips near `0.5` | exact + geometry |
+| Are Strang and Lie still rejected? | **Yes, now on a measurement**: `16x` worse than midpoint at production `delta*dt`, while Magnus is more accurate *and* `3.2x` faster. Correct implementations -- they show orders `2.00` and `1.00` in the clean regime. The old norm bound called them "completely wrong"; `16x` worse is bad but not meaningless | exact |
+| Why is `det=-1.0` so hard? | Not numerics. Two resonance crossings, the near one `2.5 sigma` out in the beam flank, giving *partial* Landau-Zener transfer. The observable swings `0.177` across `100 kHz` | geometry |
+| Do the four SPA2 Magnus regressions have an explanation? | **No.** `magnus_integral` cancellation, near-degenerate spectra and the `D_mu` diagonal are all ruled out. Most likely an artefact of scoring against `magnus@128000` | exact |
+
+### Numbers that did not survive
+
+- **`10-100x` for grading, the `120x` at `N=500`, the `5.6x` effective-shift
+  figure.** All self-referenced to `G256`, a graded run.
+- **The `1.1-7.7x` replacement figure**, measured on a model built from SPA2's
+  density *profile*. Its magnitudes were wrong by four orders: it moved the
+  eigenvalues by `~0.5` of the spectral spread where SPA2 moves them by
+  `9.8e-05`. Matching the shape is not enough. On `spa_like`, which matches
+  both, grading **loses**.
+- **Any error below `2e-04`** quoted anywhere in the older subsections. That is
+  the resolution floor stated in *How Well Truth Is Actually Known*, and several
+  tables quote figures one to two orders below it.
+- **"Midpoint is rejected"**, in *Superseded: Midpoint Sampling Measured With The
+  Broken Metric*. It is the shipped default and is `45x` better than
+  left-endpoint where they differ cleanly.
+- **"Why the scheme stays first order is unresolved."** It is resolved: see the
+  `delta*dt` mechanism above.
+
+### What a reader should take away
+
+1. **Do not reason about convergence order at production settings.** There is no
+   asymptotic regime there. Rank by measured error at matched wall clock.
+2. **Never reference a scheme against a finer run of itself.** Use a closed form,
+   or at minimum a different discretisation, and report the reference's own
+   uncertainty next to the result.
+3. **Never compare populations at a fixed detuning near a steep feature.**
+   Compare lineshapes; report the effective detuning shift and the residual.
+4. **Report the density dynamic range beside any grading result.** Below about
+   `10x` the comparison is meaningless -- a model with `1.01x` range produced a
+   confident "grading never helps" that was purely an artefact of the setup.
+
+### The chronological record
+
+Everything below is kept in the order it was measured, including the parts later
+overturned, because the *way* each conclusion failed is the reusable lesson.
+Subsections superseded by the analytic-model work carry a banner.
+
+### The Reference Is The Result
+
+> **Superseded.** the `G256` reference is a **graded** run, so every accuracy ratio scored against it is self-referenced and flatters grading. The `1-2e-04` truth floor derived later in this section also invalidates both operands of the `3.422e-05` vs `1.446e-04` argument. Superseded by *Graded Grids Against Exact Solutions*.
+
+**`N_steps=128000` on the uniform grid is not converged, and using it as a
+reference inverts conclusions.** Candidate references on the `3x2` grid, uniform
+(`U`) and graded (`G`) at `128000` and `256000` steps, pairwise `max|diff|`:
+
+| | `U128` | `U256` | `G128` | `G256` |
+| --- | ---: | ---: | ---: | ---: |
+| `U128` | `0` | `1.446e-04` | `2.618e-04` | `2.458e-04` |
+| `U256` | `1.446e-04` | `0` | `1.172e-04` | `1.011e-04` |
+| `G128` | `2.618e-04` | `1.172e-04` | `0` | `3.422e-05` |
+| `G256` | `2.458e-04` | `1.011e-04` | `3.422e-05` | `0` |
+
+This is a **reference-free** comparison: each scheme against a finer version of
+itself, with no shared arbiter.
+
+- graded self-agrees to `3.422e-05` between `128000` and `256000`
+- uniform self-agrees only to `1.446e-04`, `4x` worse at the same step counts
+
+The graded grid is therefore the more accurate scheme at matched step count, and
+`U128` sits `2.5e-04` from the converged cluster.
+
+An earlier pass in this session scored everything against `U128` and concluded
+grading was *worse* above `N_steps=16000`. That was uniform being flattered by a
+reference drawn from its own error structure, which partially cancels for
+uniform and not at all for graded. The effect is negligible where errors are
+`1e-02` and dominant where they approach the reference's own error, i.e. exactly
+where the false conclusion appeared. **Any future convergence claim here needs a
+reference from a different discretisation, not a finer run of the same one.**
+
+`G256` is the reference below, good to about `3.4e-05`.
+
+### The Worst Cell Sets Everything, And It Is One Cell
+
+> **Superseded.** the per-cell table is self-referenced to `G256`, and its `1e-06` to `5e-05` entries sit one to two orders below the `2e-04` truth floor stated in *How Well Truth Is Actually Known*. The qualitative point -- that one cell sets worst-case error -- stands; the numbers do not.
+
+Per-cell error against `G256`:
+
+| `N_steps` | uniform `det=-1.0 p4` | graded `det=-1.0 p4` | uniform `det=+1.5 p1` | graded `det=+1.5 p1` |
+| ---: | ---: | ---: | ---: | ---: |
+| `500` | `2.256e-02` | `1.201e-02` | `2.413e-02` | `1.316e-03` |
+| `1000` | `2.194e-02` | `4.313e-03` | `5.708e-04` | `4.454e-05` |
+| `4000` | `9.142e-03` | `2.529e-03` | `2.159e-05` | `1.881e-06` |
+| `24000` | `3.607e-04` | `1.029e-03` | `1.714e-06` | `7.512e-06` |
+
+Four of the six cells (`det=+0.0` and `det=+1.5`, both prefactors) converge
+cleanly and monotonically under both grids, reaching `1e-06` to `5e-05` by
+`24000`. **The two `det=-1.0` cells oscillate and hold the worst-case error near
+`1e-03` at every step count tested.** That is the same cell the existing
+convergence data names as worst, and its selected indices are stable, so this is
+numerics rather than labelling.
+
+### Grading Is More Accurate, And Still Cannot Be Cashed In
+
+> **Superseded.** self-referenced to `G256`. The `10-100x` and `120x` figures do not survive; measured against exact solutions the gain is single digits on the SPA2 profile. Superseded by *Graded Grids Against Exact Solutions*.
+
+On the cells that behave, grading is worth a large reduction in error at a given
+step count -- `120x` at `N_steps=500` on `det=+0.0 p1`, `13x` at `1000` on
+`det=+1.5 p1` . Combined with the reference-free result above, grading is
+the better discretisation on every measurement that is not a single point.
+
+The obstacle is that a scan is certified by its **worst** cell, and at
+`det=-1.0` -- the partial-transfer regime where `remaining` is about `0.69` and
+the physics is interesting -- the worst-cell error oscillates by more than the
+difference between the two grids. Over `N_steps` from `500` to `24000` the
+worst-cell ratio swings between `6.4x` in favour of grading and `3x` against,
+with `graded@1000 = 4.3e-03` against `graded@1500 = 1.5e-02` -- worse with 50%
+more steps.
+
+**Those swings are the oscillation, not a property of either grid.** No
+single-point comparison in this range supports a claim in either direction, and
+three readings taken during this session -- a `2x` for grading, a claim that
+grading was worse above `16000`, and an `8x` step saving inferred from
+`graded@1000` -- were all nodes. The correct statement is that grading is more
+accurate but its step-count saving is *unmeasurable* on the certifying cell, not
+that it is absent.
+
+### The Ceiling Is `1.58x`, And The Step Cap Was Hiding It
+
+A region where `H` is constant needs no steps at all: `exp(-i H dt)` is exact for
+any `dt`. So quiet stretches of the trajectory *must* tolerate long steps, and
+any measurement suggesting otherwise is measuring something else. The first pass
+here capped graded steps at `max_ratio=4` on the assumption that long steps
+degrade the eigenvector overlap `reorder_evecs` tracks by. That cap was
+**binding** -- the produced grid ran `0.28x` to `4.07x` -- so the grid was
+forbidden from doing the one thing grading is for, and the assumption behind it
+is wrong exactly where it matters: a region quiet enough to earn a long step is
+one whose eigenvectors are barely rotating.
+
+Sweeping the cap, worst-cell error against `G256`:
+
+| `N_steps` | uniform | `mr=4` | `mr=16` | `mr=64` | `mr=256` |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| `1000` | `2.194e-02` | `4.313e-03` | `1.662e-02` | `6.058e-03` | `6.133e-03` |
+| `2000` | `9.883e-03` | `7.844e-03` | `9.072e-03` | `1.589e-02` | `1.590e-02` |
+| `4000` | `9.142e-03` | `2.529e-03` | `5.317e-03` | `3.731e-03` | `3.796e-03` |
+| `8000` | `3.547e-03` | `2.699e-03` | `2.617e-03` | `4.149e-03` | `4.197e-03` |
+
+Selected indices stayed `(14, 35)` throughout, so the label tracking the cap was
+protecting never needed protecting. Equidistribution saturates at `46.97x` the
+uniform step, so `mr=256` and `mr=1024` return the same grid as `mr=64`.
+
+**Raising the cap costs nothing and gains nothing.** Steps up to `47x` in the
+quiet regions land in the same error band, which confirms the physics -- those
+regions really are free -- while showing the freed budget is too small to matter.
+
+Why it is too small, quantitatively. Median `||dH/dt||` relative to its own peak:
+
+| `z` | share of path | median density |
+| --- | ---: | ---: |
+| `-80..-40 mm` | `14.3%` | `7.0e-01` to `1.8e-01` |
+| `45..72 mm` | `9.6%` | `2.1e-02` |
+| `72..120 mm` | `17.1%` | `4.0e-02` |
+| `120..200 mm` | `28.6%` | `4.1e-03` |
+
+Two things bound the payoff:
+
+1. **No stretch of this trajectory is static.** The quietest is `4.1e-03` of
+   peak, not zero -- the ring-electrode Stark field decays smoothly and never
+   flattens within the flight.
+2. **The square root destroys the leverage.** Local error goes as `g*dt^2`, so
+   `1/250` the density buys `sqrt(250) ~ 16x` longer steps, not `250x`. Under
+   *uncapped* allocation that `28.6%` of the path still consumes `10.7%` of the
+   step budget, so deleting it entirely would save `10.7%`.
+
+Integrating the equidistribution bound over the whole trajectory:
+
+| order | `N_uniform / N_optimal` |
+| --- | ---: |
+| `p=1` | `1.58x` |
+| `p=2` | `1.39x` |
+
+So the honest figure for a graded grid on this problem is about **`1.5x`** --
+real, and comparable to the `1.572x` from BLAS pinning that was adopted, but an
+order of magnitude below what the `63774x` dynamic range in `||dH/dt||`
+superficially suggests. It cannot be certified on the current observable because
+`det=-1.0` oscillates by more than a `1.5x` change in step count produces.
+
+This ceiling was computed in the first diagnostic of the investigation (`1.59x`
+at `p=1`) and then lost track of through a series of confounded comparisons. It
+was the right answer from the start.
+
+### What `det=-1.0` Actually Is, And Why It Never Converged
+
+It is not a numerics problem. The cell is physically ill-conditioned, and the
+metric used throughout this investigation divides by that conditioning.
+
+The Stark-shifted `J=1 -> J=2` transition frequency **sweeps down and back up**
+along the flight: `+0.34 MHz` relative to the carrier at `z=-80 mm`, down to
+`-3.03 MHz` near `z=-33 mm`, back to `+0.59 MHz` by `z=130 mm` and flat after.
+Any detuning inside that range is therefore crossed **twice**, and the detuning
+selects *where*:
+
+| detuning | resonance crossings | field at the crossing | outcome |
+| --- | --- | --- | --- |
+| `+1.5 MHz` | none (above the `+0.587` maximum) | -- | no transfer; saturated at `0` |
+| `0.0 MHz` | `z = -68.3 mm`, `+28.6 mm` | second is exactly the beam centre | complete transfer; saturated at `1` |
+| `-1.0 MHz` | `z = -62.5 mm`, `-1.1 mm` | `8.4 sigma` and `2.75 sigma` out | **partial** transfer; unsaturated |
+
+`det=0.0` and `det=+1.5` converge to `1e-05` and `1e-06` because they are
+saturated: the observable sits against a floor or a ceiling and its derivative
+with respect to everything is small. `det=-1.0` crosses resonance at
+`z = -1.1 mm`, `2.75 sigma` from the beam centre, where the field amplitude is
+about `15%` of peak. Weak coupling at a finite sweep rate is the intermediate
+Landau-Zener regime, where transfer is steeply sensitive to coupling and sweep
+rate.
+
+Measured directly, holding the grid fixed at `N_steps=8000` and perturbing only
+the detuning: `d(remaining)/d(detuning)` is `2e-03` per kHz over a `30 kHz`
+window and reaches `6e-03` per kHz nearby, with the observable swinging `0.177`
+across `100 kHz`. **The `1e-03` "convergence error" chased through this whole
+investigation corresponds to an effective detuning error of about `0.2 kHz`** --
+`0.02%` of the `1 MHz` detuning. No timestep scheme will ever drive that to
+`1e-06` in population, because the observable amplifies a sub-kHz effective error
+by three orders of magnitude.
+
+A predicted Stuckelberg interference between the two crossings was **not
+confirmed**: the accumulated phase implies a `~3 kHz` fringe, and a `0.5 kHz`
+scan over `30 kHz` shows a smooth broad feature (dominant Fourier period equal to
+the window) with only `~0.002` ripple near the sampling limit. Steep slope alone
+accounts for the conditioning; no interference is needed to explain it.
+
+### A Metric That Works
+
+> **Superseded.** the lineshape metric itself is sound and is still the right tool, but this table's reference is a graded `N=64000` run, so the graded rows are self-referenced. Read the method, not the numbers.
+
+Comparing populations at a fixed detuning near a steep lineshape feature
+measures slope, not discretisation error. Comparing whole *lineshapes* and
+reporting the best-fit **effective detuning shift**, with the residual after
+alignment, is well conditioned. Over `det` from `-1.10` to `-0.90 MHz`, `21`
+points, against a graded `N=64000` reference:
+
+| `N_steps` | scheme | `max|dP|` | effective shift | residual |
+| ---: | --- | ---: | ---: | ---: |
+| `1000` | uniform | `2.156e-02` | `2.708 kHz` | `9.244e-03` |
+| `1000` | graded | `6.904e-03` | `0.482 kHz` | `3.532e-03` |
+| `2000` | uniform | `9.777e-03` | `-0.530 kHz` | `4.587e-03` |
+| `2000` | graded | `1.137e-02` | `0.345 kHz` | `4.941e-03` |
+| `4000` | uniform | `4.536e-03` | `0.014 kHz` | `2.971e-03` |
+| `4000` | graded | `4.770e-03` | `-0.291 kHz` | `2.813e-03` |
+| `8000` | uniform | `2.459e-03` | `-0.034 kHz` | `1.510e-03` |
+| `8000` | graded | `2.938e-03` | `0.119 kHz` | `1.625e-03` |
+| `16000` | uniform | `1.045e-03` | `-0.029 kHz` | `6.472e-04` |
+| `16000` | graded | `7.200e-04` | `-0.028 kHz` | `4.915e-04` |
+
+**The residual converges cleanly and monotonically** for both schemes --
+`9.2e-03, 4.6e-03, 3.0e-03, 1.5e-03, 6.5e-04` for uniform, ratios near `2` per
+doubling, i.e. first order, exactly what left-endpoint sampling predicts. The
+propagator was converging correctly the entire time; `max|dP|` could not see it.
+
+Graded is `5.6x` better in effective detuning at `N_steps=1000` (`0.48 kHz`
+against `2.708 kHz`) and a wash above that on this window. Note the window lies
+*entirely* inside the hard partial-transfer regime; the well-conditioned cells,
+where grading wins `10-100x`, are not represented in it.
+
+**Consequence for any future convergence work here.** A convergence check that
+compares `probabilities_final` at fixed detunings will report false
+non-convergence wherever a scan point sits on a steep part of the lineshape.
+`benchmarks/bench_convergence.py` does exactly this, and its detuning grid
+includes `-1.0 MHz`. This is also a live candidate explanation for the
+unresolved multitone convergence puzzle recorded earlier in this document, whose
+detunings are likewise near resonance. Before treating either as a numerical
+failure, check the local `d(observable)/d(detuning)`.
+
+### Implemented: `step_density` On Both Entry Points
+
+Shipped as opt-in. `build_time_grid(T, N_steps, *, density=None, order=1,
+max_ratio=64.0, probes=400)` and `field_variation_density(...)` are exported
+from `state_prep`; `run()` and `run_microwave_scan()` take `step_density`
+(`None`, `"auto"`, or a callable), threaded through the loky workers. The
+evolution loops are untouched -- they already read `dt` per step -- and
+`density=None` returns `np.linspace(0, T, N_steps)`, verified `array_equal`.
+Results carry `time_grid` (`"uniform"`/`"graded"`).
+
+One implementation subtlety worth keeping: the `max_ratio` floor has to be
+solved for as a fixed point of `f = mean(max(w, f)) / max_ratio`. Flooring the
+weight also raises the mean weight, which lengthens every step, so a floor taken
+from the unfloored mean overshoots the cap -- measured `1.43x` over at
+`max_ratio=2` before the fix.
+
+End-to-end through the public API, SPA2, `3x2` grid, batch 6, `repeat=3`,
+interleaved, against the `G256` reference:
+
+| case | mean | std | worst-cell error |
+| --- | ---: | ---: | ---: |
+| uniform `N=10000` | `22.49 s` | `0.05 s` | `6.624e-04` |
+| graded `N=10000` | `22.70 s` | `0.05 s` | `8.021e-04` |
+| graded `N=6329` | `14.50 s` | `0.09 s` | `3.358e-03` |
+
+**Grading costs `+0.92%` at matched `N_steps`**, so the extra density pass is
+free in practice and the option is safe to leave on.
+
+**The `1.58x` is a ceiling, not a delivered speedup, and this table is the
+warning.** Dividing `N_steps` by `1.58` does run `1.55x` faster, but the
+worst-cell error goes from `6.6e-04` to `3.4e-03` -- five times worse, not equal.
+At matched `N_steps` graded is also marginally behind uniform in the worst cell
+(`8.0e-04` against `6.6e-04`), inside the oscillation. The ceiling is realised on
+the cells that converge cleanly, not on `det=-1.0`, and a scan is certified by
+its worst cell. Anyone reducing `N_steps` on the strength of `step_density`
+should confirm the reduction on the cells they actually care about, with
+`benchmarks/bench_step_grid.py`.
+
+### Which Quantity To Grade On: Three Alternatives, All Rejected
+
+`||dH/dt||` was criticised above for grading on a quantity the propagator
+already handles exactly: most of it is the *diagonal* Stark variation, it
+outweighs the microwave term by about `3e+08` at the median, and the resulting
+grid puts `31%` of a 10000-step budget into the Stark ramp entrance (`14%` of
+the path) and only `11%` into the beam crossing. Three alternatives were built
+and measured. **The criticism was wrong, and the measurement is what shows it.**
+
+- `comm` -- `||[H, dH/dt]||_2`, the Magnus time-ordering term. In `H`'s
+  eigenbasis `[H, H']_ij = (E_i - E_j) H'_ij`, purely off-diagonal, gap-weighted.
+- `nac` -- `||dV/dt||_F`, the eigenbasis rotation rate, from a finite difference
+  of phase-aligned eigenvectors. This is what `reorder_evecs` must track.
+- `mu` -- `||dH_mu/dt||_2` alone, the beam envelope. The control that tests
+  whether the error is beam-driven.
+
+Step placement, as a share of a 10000-step budget (path share in brackets):
+
+| monitor | max/median | `z` in `-80:-40` (`14.3%`) | `z` in `15:45` (`10.7%`, beam) |
+| --- | ---: | ---: | ---: |
+| `dh` | `15.6` | `31.1%` | `11.4%` |
+| `comm` | `15.6` | `31.1%` | `11.4%` |
+| `nac` | `37.3` | `29.4%` | `12.7%` |
+| `mu` | `36395.5` | `3.2%` | `29.5%` |
+
+Worst-cell error against `G256`:
+
+| `N_steps` | uniform | `dh` | `nac` | `mu` |
+| ---: | ---: | ---: | ---: | ---: |
+| `500` | `2.413e-02` | `1.271e-02` | `6.008e-03` | `4.113e-01` |
+| `1000` | `2.194e-02` | `4.313e-03` | `6.345e-03` | `1.317e-01` |
+| `2000` | `9.883e-03` | `7.844e-03` | `8.038e-03` | `3.160e-02` |
+| `4000` | `9.142e-03` | `2.529e-03` | `9.971e-03` | `1.510e-02` |
+| `8000` | `3.547e-03` | `2.699e-03` | `1.001e-03` | `4.677e-03` |
+| `16000` | `1.041e-03` | `1.359e-03` | `9.080e-04` | `1.558e-03` |
+
+Three results:
+
+1. **`comm` is redundant with `dh`.** The two grids differ by `6.7e-09 s`, under
+   `5%` of one uniform step. The dominant energy differences are the rotational
+   splittings, which are near-constant along the trajectory, so the commutator is
+   essentially proportional to `||H'||` and equidistribution -- which sees only
+   relative density -- returns the same grid. There was never a second monitor
+   here.
+2. **`nac` is not clearly better than `dh`.** Best at `500`, `8000` and `16000`,
+   worse at `1000` and `4000`. Within the oscillation, which is the same
+   amplitude as the differences between schemes.
+3. **`mu` is far worse than everything, and this is the informative result.**
+   Concentrating on the beam and starving the Stark ramp is catastrophic:
+   `4.1e-01` at `N_steps=500`, worse than uniform at *every* step count tested.
+   Per-cell at `4000` it degrades every cell to about `1e-02`, including the easy
+   `det=+1.5` cells that reach `2e-05` under uniform and `2e-06` under `dh`.
+
+Result 3 settles the design question the critique raised. **The error is not
+beam-driven. It is dominated by the region `dh` already weights**, and starving
+that region to feed the beam destroys accuracy globally. The frozen-`H` step is
+exact for a constant diagonal, but the diagonal *changes* within a step, and the
+resulting relative-phase error between levels is a real error -- it is not
+removed by the exactness of `exp(-i D dt)`. `||dH/dt||` was a defensible monitor
+and the objection to it was wrong.
+
+Per-cell at `N_steps=4000`, showing both the point above and the cell that
+blocks everything:
+
+| scheme | `det=-1.0 p1` | `det=-1.0 p4` | `det=+0.0 p1` | `det=+1.5 p1` |
+| --- | ---: | ---: | ---: | ---: |
+| uniform | `6.525e-04` | `9.142e-03` | `2.567e-04` | `2.159e-05` |
+| `dh` | `2.090e-03` | `2.529e-03` | `3.439e-04` | `1.881e-06` |
+| `nac` | `1.491e-03` | `9.971e-03` | `1.653e-04` | `1.835e-05` |
+| `mu` | `6.362e-03` | `1.510e-02` | `9.107e-03` | `9.862e-03` |
+
+No monitor systematically fixes `det=-1.0 p4`. That cell is not a grid problem.
+
+### How Well Truth Is Actually Known
+
+The reference-free argument above compared each scheme against a finer run of
+*itself*, and `G128`/`G256` share a monitor, so their `3.4e-05` agreement
+measures that family's self-convergence rather than its distance from truth.
+Independently constructed discretisations at high step count spread further:
+
+| against `G256` | |
+| --- | ---: |
+| `G128` (same monitor) | `3.422e-05` |
+| `U256` | `1.011e-04` |
+| `mu`-graded at `128000` | `1.180e-04` |
+| `nac`-graded at `128000` | `1.686e-04` |
+
+Truth is therefore known to roughly `1-2e-04`, not `3e-05`, and **no error below
+about `2e-04` in any table here is resolvable.** The conclusions above rest on
+errors of `1e-03` and larger, which are safely above that, but a future run that
+needs finer discrimination needs a better reference first.
+
+### Implemented: `time_sampling`, Defaulting To Midpoint
+
+Shipped 2026-08-28, and this one **changes results by default**. `run()` and
+`run_microwave_scan()` take `time_sampling` (`"mid"`, the default, or `"left"`),
+threaded to all four evolution loops and through the loky workers. Only the
+argument to `H_slow_t(...)` / `H_mu_t(...)` moves; `dt` and everything
+downstream are untouched. `_sample_offset` validates the value. The multitone
+loop's beat phase `exp(-i * delta_omega * t)` is evaluated at the sampled time
+too, since it is part of the Hamiltonian's time dependence, and
+`gap_tracker.update` records energies against the sampled time rather than the
+grid point. Results carry `time_sampling`.
+
+Default flipped rather than left opt-in because midpoint is more accurate at
+every step count measured and costs nothing per step. `"left"` remains available
+and reproduces pre-option results exactly.
+
+**Consequences to be aware of.**
+
+- Every result changes. Measured `max|mid - left|` of `0.112` at `N_steps=300`
+  on a 3-point scan; the difference shrinks with `N_steps` and is not
+  measurable by `16000`, but it is not zero at production settings.
+- **The saved analyses in `results/` were produced with left-endpoint sampling
+  and no longer correspond to what the code now produces.** They have not been
+  regenerated. Anything comparing new output against them must either pass
+  `time_sampling="left"` or regenerate.
+- The full suite passes unchanged (`43 passed, 1 skipped`), including
+  `test_state_labelling.py`, whose tracked-index swap at `N_steps=160000`
+  survives the change. The bitwise tests still hold because they compare two
+  runs of the same settings.
+
+### The Ceiling Is `1/f`, And Uniform Grids Get A Cancellation Bonus
+
+Two results that together predict when grading is worth enabling, without
+running anything.
+
+**The ceiling is the reciprocal of the active fraction.** For a trajectory that
+is active over a fraction `f` and static elsewhere, equidistribution can buy at
+most `1/f`. Verified against the formula directly:
+
+| active `f` | ceiling `p=1` | `1/f` |
+| ---: | ---: | ---: |
+| `1.00` | `1.00x` | `1.00` |
+| `0.50` | `2.00x` | `2.00` |
+| `0.10` | `10.02x` | `10.00` |
+| `0.02` | `50.60x` | `50.00` |
+
+Crucially this depends on how much of the run is **active**, not on how deep the
+quiet is. SPA2's density spans `63774x`, which sounds decisive, but its effective
+active fraction is `63%`, so the ceiling is `1.58x`. A deep but narrow quiet
+region contributes almost nothing to the integral that sets the bound.
+
+**Uniform grids cancel most of their own error.** Measured per-step against the
+closed form on `spa_like` at production `delta*dt`:
+
+| grid | summed local error | global error | cancellation |
+| --- | ---: | ---: | ---: |
+| uniform | `3.763e-03` | `2.129e-04` | **`17.7x`** |
+| graded `p=1` | `2.166e-03` | `8.746e-04` | `2.5x` |
+| graded `p=2` | `1.731e-03` | `3.816e-04` | `4.5x` |
+
+Equidistribution does exactly what it claims -- it reduces the *summed* local
+error by `1.7-2.2x`. It still loses, because uniform sampling cancels `94%` of
+its local error and grading only `60-78%`.
+
+**The mechanism is telescoping, not phase.** On a uniform grid the midpoint
+rule's leading error sums as `Sum (dt^2/24) f''(t_i) dt -> (dt^2/24)[f'(T) -
+f'(0)]`, a **boundary term**: interior contributions cancel pairwise because
+every step has the same `dt`. Vary `dt` and the sum becomes a weighted integral
+of `f''` instead, and nothing telescopes.
+
+Demonstrated independently on the commuting model, by moving a bump so the
+boundary derivative stops vanishing: interior bump gives uniform `3.31e-13`,
+a bump at `t/T = 0.06` (where `f'(0) = 3.6e+03`) gives `9.77e-06`. Seven orders,
+from the boundary term alone.
+
+An earlier explanation in terms of a geometric series in the fast phase is
+**wrong**: the cancellation is already `17.6x` at `delta*dt = 1e-02`, where
+phases barely rotate. Phase rotation only widens uniform's advantage from `3.5x`
+to `7x` between `delta*dt = 1e-02` and `8e+04`; it does not create it.
+
+**Practical rule.** Grading is worth enabling when `1/f` comfortably exceeds the
+cancellation ratio being given up -- on the order of `14x`, not `1x`. Compute
+`1/f` from the field profile before running anything:
+
+```python
+d = field_variation_density(H_slow, muw_hams)(ts)
+ceiling = T * np.trapezoid(d, ts) / np.trapezoid(np.sqrt(d), ts) ** 2
+```
+
+SPA2 gives `1.58x` and grading loses. A run that is `90%` static gives `10x` and
+should be re-measured rather than assumed either way.
+
+**Evidence class**: exact solution, plus arithmetic on measured profiles.
+
+### Graded Grids Against Exact Solutions
+
+**Measured 2026-08-28, after two invalid attempts.** `step_density` shipped on
+accuracy figures scored against `G256`, which is *itself a graded run* -- the
+same self-reference bias this section identifies for `U128`, mirrored with the
+sign flipped in grading's favour. Every `10-100x`, the `120x` at `N=500` and the
+`5.6x` effective-shift figure inherit it and **do not survive**. The honest
+figure is single digits.
+
+**Verdict: grading helps, by `1.1x` to `7.7x`, on the structure the real problem
+has.** Non-commuting `H`, density profile taken directly from the measured SPA2
+`||dH/dt||` (`41278x` dynamic range against the real `63774x`, `61%` of the
+flight quiet), enveloped microwave coupling in `muw_hams`, density built by the
+shipped `field_variation_density`, grids by the shipped `build_time_grid`, truth
+from a fine product with self-convergence at `1.4e-07`:
+
+| `N_steps` | median gain | min gain over 3 seeds |
+| ---: | ---: | ---: |
+| `500` | `2.52x` | `2.37x` |
+| `1000` | `2.47x` | `1.83x` |
+| `2000` | `3.46x` | `2.73x` |
+| `4000` | `1.18x` | `1.14x` |
+
+Grading wins in **all 12** rows. No single `order` dominates: `order=1` and
+`order=2` take five rows each, `order=4` two, and at `N=4000` the aggressive
+grids can lose to uniform while `order=4` still wins. Gains above the `1.58x`
+equidistribution ceiling are real but come from uniform being *erratic* at large
+`delta*dt`, not from grading being more efficient than the bound allows.
+
+### Two Invalid Tests, Recorded So They Are Not Repeated
+
+Both produced confident wrong answers before the setup was checked.
+
+**A flat density.** The first model used `H_slow = R(Gt) H0 R(Gt)^H`, a *uniform*
+rotation, whose `||dH/dt||` is constant. Measured dynamic range: **`1.01x`**,
+against the real trajectory's `63774x`. Testing a step-*placement* optimisation
+on a problem with uniform step requirements measures nothing, and it produced
+the conclusion "grading never wins" plus a recommendation to delete the feature.
+**Always report the density dynamic range alongside any grading result**; below
+about `10x` the comparison is meaningless.
+
+**A commuting `H`.** For commuting `H(t)` the propagation collapses to a scalar
+quadrature of `F = integral of f`, and composite midpoint on a smooth interior
+bump enjoys Euler-Maclaurin cancellation -- the leading error term is
+`(dt^2/24)[f'(T) - f'(0)]`, which vanishes when the bump is interior. Uniform
+then reaches `1e-12` while any graded grid, which destroys the cancellation,
+sits near `1e-02`. This is a genuine property, not an artefact, but it is
+specific to commuting `H` and says nothing about the real problem. Moving the
+bump does not rescue it: at `11 sigma` from the boundary `f'` still vanishes
+there. **The `scalar` model cannot evaluate grading at all.**
+
+The second point has a cost: `scalar` is the only model here with a closed form
+at arbitrary spectral scale, so it is the only one that could reach production
+`delta*dt`. Since it cannot evaluate grading, **the grading result above is
+limited to `delta*dt` between `5` and `40`**, and a brute-force oracle cannot go
+further -- resolving `delta*dt ~ 7.65e+04` needs the same `~7.6e+08` steps that
+make the regime unreachable in the first place. Extrapolating the `1.1-7.7x` to
+production settings is an assumption, not a measurement.
+
+**Evidence class**: exact solution (fine-product oracle, self-convergence
+verified) at `delta*dt <= 40`. Supersedes every `G256`-referenced grading claim.
+
+### Magnus At Production `delta*dt`, Against Closed Forms
+
+**Measured 2026-08-28. This closes the Magnus question.** `rotating` and
+`scalar` have closed forms at *any* spectral scale, so production `delta*dt` is
+reachable with exact truth and no oracle to validate. `split_model` puts the
+coupling in `muw_hams` while keeping the sum equal to the model, so the closed
+form survives. `n=64`, batch `25`, `delta*dt = 7.65e+04`, `||H_mu||/spread =
+5.0e-07` and `||A|| = 0.038 rad`, both matched to SPA2.
+
+| model | `N_steps` | `left` | `mid` | `magnus` | magnus time |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `rotating` | `1000` | `2.212e-02` | `2.205e-02` | `2.205e-02` | `3.59 s` vs `12.47 s` |
+| `rotating` | `4000` | `1.555e-02` | `1.556e-02` | `1.556e-02` | `14.35 s` vs `49.85 s` |
+| `scalar` | `1000` | `3.869e-01` | `1.397e-01` | `1.397e-01` | `3.02 s` vs `11.89 s` |
+| `scalar` | `4000` | `4.050e-01` | `9.033e-03` | `9.033e-03` | `12.08 s` vs `47.88 s` |
+
+**Magnus matches `mid` to four significant figures against exact truth**, at
+every step count on both models, while running `3.5-4x` faster.
+
+Speed, measured separately with warmup and three interleaved repeats,
+`n=64`, `N=2000`:
+
+| batch | shipped | magnus | speedup |
+| ---: | ---: | ---: | ---: |
+| `1` | `4.34 +- 0.02 s` | `3.53 +- 0.01 s` | `1.23x` |
+| `5` | `8.02 +- 0.01 s` | `4.25 +- 0.02 s` | `1.89x` |
+| `25` | `26.03 +- 0.01 s` | `8.05 +- 0.01 s` | `3.23x` |
+
+The scaling with batch is the mechanism: Magnus removes the *per-scan-point*
+`O(n^3)` eigensolve and leaves the shared slow one, so the gain grows with batch
+and is `1.23x` at batch `1`. Consistent with the independent `2.49x` measured on
+the real SPA2 workload in `NATIVE_PORT_INVESTIGATION.md`.
+
+**A self-inflicted regression, caught late.** The scaling-and-squaring guard
+added to `apply_expm_taylor` used `np.linalg.norm(A, 2)` -- a spectral norm, so
+an SVD, `182 us` at `n=64` against the `420 us` eigensolve the propagator exists
+to avoid. It ate `43%` of the benefit and sat through several measurements
+unnoticed. Now `np.linalg.norm(A, "fro")` at `3.1 us`: Frobenius bounds the
+spectral norm from above, which is all scaling and squaring needs.
+
+**Two side results.** On the *commuting* model `mid` holds order `1.96`/`2.00`
+even at `delta*dt = 7.65e+04` -- with no time-ordering error there is nothing for
+large `delta*dt` to spoil, which is the mechanism stated exactly. And `left` is
+saturated there at `4e-01` with no convergence at all, making midpoint `45x`
+better and independently justifying the default flip.
+
+**Evidence class**: exact solution (closed form) at production `delta*dt`, plus
+direct interleaved timing. No reference requiring validation.
+
+### Strang And Lie, Measured Rather Than Bounded
+
+**Measured 2026-08-28.** Both were rejected on a propagator-norm bound --
+accumulated error `1.39e+01` against a trivial bound of `2` -- with no observable
+ever run. Since this document's recurring lesson is to conclude from a
+measurement, they are now implemented (`make_splitting_loop` in
+`benchmarks/bench_analytic.py`) and scored against exact solutions.
+
+**The implementations are correct.** In the clean regime (`delta*dt = 1e-03`)
+Strang measures order `2.00` and Lie order `1.00`, their textbook values, with
+Strang matching midpoint and Magnus:
+
+| variant | `N=1000` | `N=2000` | order |
+| --- | ---: | ---: | ---: |
+| `mid` | `1.222e-08` | `3.051e-09` | `2.00` |
+| `magnus` | `3.665e-08` | `9.152e-09` | `2.00` |
+| `strang` | `3.644e-08` | `9.101e-09` | `2.00` |
+| `lie` | `4.502e-05` | `2.250e-05` | `1.00` |
+
+**At production `delta*dt` they lose, and the rejection stands.** On `rotating`
+at `delta*dt = 7.65e+04`, `N=4000`:
+
+| variant | error | vs midpoint |
+| --- | ---: | ---: |
+| `mid` / `magnus` | `2.280e-03` | -- |
+| `strang` | `3.675e-02` | `16x` worse |
+| `lie` | `3.560e-02` | `16x` worse |
+
+**But the bound overstated the case.** It concluded the propagator is
+"completely wrong", the accumulated error exceeding the trivial bound of `2`.
+Measured on an observable they are `4-16x` worse than midpoint -- bad, and
+disqualifying given Magnus is simultaneously more accurate *and* `3.2x` faster,
+but not meaningless. A bound that says "worse than useless" where the
+measurement says "16x worse" is the failure mode this document keeps recording.
+
+**A trap in the `engineered` model, found here.** That model is constructed as
+`U = V(t) exp(-i Phi(t))` -- a product of exactly two exponentials, which *is*
+the Lie-split form -- and its natural split (`H_slow = V diag(w) V^H`,
+`H_mu = theta' G`) is aligned with that factorisation. Lie therefore reproduces
+it almost exactly and appears `73000x` better than midpoint. Splitting the same
+`H(t)` arbitrarily instead:
+
+| split | `mid` | `strang` | `lie` |
+| --- | ---: | ---: | ---: |
+| natural, `V`/`Phi` aligned | `2.691e-02` | `4.323e-02` | `3.677e-07` |
+| arbitrary, misaligned | `2.691e-02` | `9.800e-02` | `1.020e-01` |
+
+**Do not evaluate splitting methods on `engineered` with its natural split.**
+The same caution applies to any model built by choosing `U` first: the
+factorisation used to construct it will flatter whichever integrator shares that
+structure.
+
+**Evidence class**: exact solution, both regimes.
+
+### Analytic Ground Truth, And Why No Order Was Ever Measurable
+
+**Added 2026-08-28: `benchmarks/analytic_models.py`, `tests/test_analytic.py`.**
+Six time-dependent Hamiltonians with known exact solutions. Nothing in them
+imports `centrex_tlf`, so these are the first checks in this repository against
+an answer that is true independently of the code -- closing the gap `AGENTS.md`
+names, that the suite "checks internal consistency, so a change to the
+underlying `centrex_tlf` Hamiltonian would move every result together and leave
+all tests passing".
+
+Every reference used earlier in this investigation was a finer run of some
+scheme, and each time the reference's own error turned out to be comparable to
+what was being measured. That is now unnecessary.
+
+| model | form | exact answer | verified to |
+| --- | --- | --- | ---: |
+| `rotating` | `H = e^{-iGt} H0 e^{iGt}` | `U = e^{-iGt} e^{-i(H0-G)t}` | `2.2e-11` |
+| `scalar` | `H = f(t) H0` | `U = exp(-i F(t) H0)` | `1.6e-11` |
+| `rosen_zener` | sech pulse, fixed detuning | `sin^2(pi Om0 tau/2) sech^2(pi D tau/2)` | `2.3e-09` |
+| `allen_eberly` | sech pulse, tanh chirp | `1 - cos^2(pi/2 sqrt((Om0 tau)^2-(D0 tau)^2))/cosh^2(pi D0 tau/2)` | `6.8e-13` |
+| `landau_zener` | linear sweep, fixed coupling | `exp(-pi Om^2/2a)`, **asymptotic only** | `2.0e-03` |
+| `spa2_replica` | Gaussian envelope, U-shaped sweep | none; fine `n=2` product | `~1e-11` |
+
+`allen_eberly` is the microwave-transfer analogue: envelope *and* sweep, which is
+SPA2's structure. `spa2_replica` reproduces the geometry that makes `det=-1.0`
+hard -- two crossings, the near one `2.5 sigma` out in the Gaussian flank, giving
+partial transfer of `0.68`-`0.82` (the real cell sits at `0.69`).
+
+**Landau-Zener's closed form is not an oracle.** It is a `t -> +/-inf` asymptote
+and the sweep never switches off, so a finite window leaves the population still
+oscillating toward the limit: `2.0e-03` off at the default window and `8.6e-02`
+if the window is halved. Use it as a physics check at the `1e-2` level, never for
+accuracy work. A two-level product propagator reaches `~1e-11` and is the oracle
+instead.
+
+### The Mechanism: Order Collapse Is A Time-Ordering Effect
+
+Driving the shipped batched loop on these models, with `delta*dt` dialled by the
+spectral scale:
+
+| model | `H` commutes with itself? | `delta*dt` at `N=1000` | observed order |
+| --- | --- | ---: | ---: |
+| `scalar` | yes | `1.0e-03` | `2.00` |
+| `scalar` | yes | `2.0e+01` | `2.00` |
+| `scalar` | yes | `2.0e+02` | `2.00` |
+| `rotating` | no | `1.0e-03` | `2.00` |
+| `rotating` | no | `2.0e+01` | `-0.45` |
+| `rotating` | no | `2.0e+02` | `0.18` |
+
+**The midpoint scheme is second order.** It shows exactly `2.00` whenever the
+problem is resolved, and it keeps `2.00` at any scale when `H(t)` commutes with
+itself at different times, because then the only error is quadrature of the
+scalar factor. The collapse happens only in the non-commuting case, once
+`delta*dt` exceeds about `1`: the neglected terms are time-ordering commutators
+carrying powers of `delta*dt`, and beyond that point no asymptotic power law is
+available to measure.
+
+SPA2 runs at `delta*dt ~ 7.65e+04` with a non-commuting `H`. Reaching
+`delta*dt ~ 1` would need `N ~ 7.6e+08` steps.
+
+**This single mechanism explains the whole convergence story in this document:**
+
+- why midpoint never showed its formal second order on the real problem;
+- why measured orders came out erratic and sometimes negative (`-1.09` for `mid`
+  at `4000/8000/16000`);
+- why the error oscillates in `N_steps` rather than falling monotonically;
+- why every reference was so hard to establish, and why references built from a
+  finer run of the same scheme were systematically misleading;
+- why **Richardson extrapolation is unavailable** -- it needs a clean order to
+  build its coefficients from, and there is none;
+- why **CF4, Filon quadrature and modified Magnus cannot be expected to deliver
+  their formal orders either**. They are derived from the same expansion that
+  fails to converge here. Any of them must be judged by measured error at
+  matched cost, never by order.
+
+The practical consequence for anyone extending this work: **do not reason about
+convergence order at production settings.** Rank propagators by measured error
+per unit wall clock, and use the clean regime only to confirm an implementation
+is correct.
+
+### Propagators Ranked Against Exact Solutions
+
+`benchmarks/bench_analytic.py` drives the shipped loops on the models above. The
+model is split `H_slow(t) = H_model(t) - H_mu(t)` with `H_mu` a small enveloped
+coupling, so the sum is exactly the model and the closed form still applies,
+while the interaction-picture Magnus propagator gets the large-diagonal plus
+small-coupling structure it exists to exploit. Batch entries are identical, so
+all of them share one known answer while the per-scan-point cost still scales.
+
+**Clean regime, the correctness gate.** `n=5`, `delta*dt = 1e-03`:
+
+| variant | order per doubling | error at `N=2000` |
+| --- | ---: | ---: |
+| `left` | `1.00` | `2.202e-05` |
+| `mid` | `2.00` | `1.208e-09` |
+| `magnus` | `2.00` | `1.068e-09` |
+
+All three loops attain their formal order to two decimals on both `rotating` and
+`scalar`. This is the first time any of that has been verified against an answer
+rather than against another run of the same code.
+
+**Realistic regime, `delta*dt = 7.65e+04`, `n=64`, batch `25`.** Two results:
+
+| model | `N_steps` | `left` | `mid` | `magnus` |
+| --- | ---: | ---: | ---: | ---: |
+| `scalar` (commuting) | `4000` | `4.050e-01` | `9.033e-03` | `9.033e-03` |
+| `rotating` (non-commuting) | `4000` | `4.244e-03` | `4.216e-03` | `4.217e-03` |
+
+- **Midpoint is vindicated where the error is phase-dominated.** On the commuting
+  model `left` saturates near `0.4` with no convergence at all, while `mid` holds
+  order `1.96`-`2.00` and reaches `9.0e-03` -- a `45x` gap. When the error comes
+  from quadrature of a large diagonal phase, which is what the Stark-shifted
+  spectrum produces, midpoint is the difference between converging and not.
+- **On the non-commuting model nothing helps**: all three sit near `4e-03` with
+  the same order. If the real problem's error is time-ordering dominated there
+  may be a floor no propagator in this family removes.
+
+**Magnus wall clock at production shape**: `13.12 s` against `49.46 s`, i.e.
+**`3.8x` faster**, better than the `2.49x` on record, with accuracy identical to
+`mid` to four significant figures.
+
+### Where Magnus Breaks, Measured
+
+Sweeping the coupling as a fraction of the spectral spread, `rotating`, `n=64`,
+batch `25`, `N_steps=4000`:
+
+| `||H_mu||/spread` | `mid` | `magnus` | verdict |
+| ---: | ---: | ---: | --- |
+| `5e-07` (**the real problem**) | `4.216e-03` | `4.217e-03` | identical |
+| `5e-06` | `4.216e-03` | `4.314e-03` | `2%` worse |
+| `5e-05` | `4.216e-03` | `4.181e-02` | `10x` worse, **silently** |
+| `5e-04` | `4.216e-03` | overflow to NaN | complete breakdown |
+
+The cause was `TAYLOR_TERMS = 8` in `apply_expm_taylor`: `||A|| ~ ||H_mu||*dt` is
+about `4.3e-02` rad at the operating point, where eight terms are ample, but
+`~1.9` at `5e-05` and `~19` at `5e-04`, where the series diverges. **Fixed** by
+scaling and squaring on the vectors, chosen from the measured `||A||`, which
+costs nothing at `k=0` and keeps the `n^2*S` scaling. After the fix `5e-04`
+degrades gracefully to `5.6e-01` -- a genuine first-order-Magnus truncation
+error, since the neglected second term grows with the coupling -- rather than
+producing NaN.
+
+Worth stating plainly: the failure at `5e-05` produced no warning of any kind.
+The operating point is two orders of magnitude away from it, so this was latent
+rather than active, but a fixed term count is the wrong shape for a guard.
+
+### The Four SPA2 Regressions Remain Unexplained
+
+Two mechanisms were proposed and both are ruled out at the real operating point:
+
+- **Cancellation in `magnus_integral`.** Its outer-product form loses the
+  `expm1` cancellation benefit, and its small-argument guard is a hard cutoff at
+  `|x*dt| < 1e-8`. Measured relative error against the `expm1` form peaks at
+  `5e-09` right at the cutoff and is `<= 4.5e-11` elsewhere. Too small by orders
+  of magnitude.
+- **Near-degenerate spectra.** Real TlF has near-degenerate hyperfine levels;
+  random Hermitian matrices do not, so the degeneracy branch was never exercised.
+  Rebuilding the model with eigenvalues in near-degenerate pairs and sweeping the
+  gap from `1e-01` to `1e-09` of the spread gives `magnus/mid` error ratios of
+  `1.00, 0.99, 1.15, 1.00, 1.00`. No degradation.
+
+At the real coupling ratio, with near-degeneracies present, Magnus matches `mid`.
+The regressions are not reproduced by anything constructible here.
+
+**The one structural element still unmodelled is `D_mu`**, the per-scan-point
+detuning diagonal, which was set to zero throughout because a nonzero `D_mu` is
+diagonal in the *slow eigenbasis* and therefore time-dependent through `V`,
+which breaks the closed form. Magnus computes its oscillatory integral from
+`delta = D + D_mu`, so a large `D_mu` changes the integrand's structure in a way
+no model here reaches. That, or the regressions are an artefact of scoring
+against `magnus@128000` -- Magnus's own fine run. Both remain open.
+
+### Reopened And Overturned: The Magnus Propagator Is Faster At Matched Accuracy
+
+**Measured 2026-08-28. `NATIVE_PORT_INVESTIGATION.md:85-173` rejects this
+propagator; that rejection does not survive a conditioning-robust metric.**
+
+Two independent defects in the original verdict:
+
+1. It scored `max|delta probabilities_final|` over `np.linspace(-2e6, 1e6, 5)`.
+   Measured local slopes at those five detunings are `9.6e-05`, `2.9e-04`,
+   `2.5e-05`, **`1.0e-01`** and `6.8e-06` per kHz. The `+0.25 MHz` point turns a
+   `0.2 kHz` effective error into `2e-02` of population on its own.
+2. It applied a `1e-6` acceptance target to `|magnus - shipped|` at matched
+   `N_steps`, treating the shipped scheme as exact. The shipped scheme's own
+   error at those step counts is about `1e-4`, so the target asked Magnus to
+   reproduce the shipped scheme's errors. The "`N_steps ~ 5e5`, `26x` slower"
+   economics is derived entirely from that number.
+
+Re-measured at **matched wall clock** -- the right question, since Magnus is
+about `2.5x` cheaper per step -- on a lineshape window, batch `25`, with the
+reference built from **two structurally different propagators** at `N=64000`
+(exact eigensolve and Magnus) agreeing to `4.234e-05`:
+
+| budget | shipped | residual | magnus | residual | verdict |
+| ---: | --- | ---: | --- | ---: | --- |
+| `14.9 s` | `N=2000` | `2.947e-03` | `N=5000` | `3.062e-03` | tie |
+| `29.8 s` | `N=4000` | `2.554e-03` | `N=10000` | `8.138e-04` | **`3.14x` better** |
+| `59.5 s` | `N=8000` | `1.463e-03` | `N=20000` | `6.542e-04` | **`2.24x` better** |
+
+Wall clock matched to within `1%` in every pair. Read the other way,
+`magnus@10000` beats `shipped@8000` on accuracy in half the time, so the speedup
+at matched accuracy is at least `2x` in the production range.
+
+### Where Magnus Is Worse, And Whether It Matters
+
+> **Superseded.** scored against `magnus@128000`, i.e. Magnus's own fine run. Superseded by *Magnus At Production `delta*dt`, Against Closed Forms*, where Magnus matches midpoint to four significant figures against exact truth.
+
+Full convergence grid, `5` detunings x `3` prefactors, at matched wall clock
+(`shipped@8000` against `magnus@20000`), against the same reference:
+
+| cell | shipped | magnus | ratio |
+| --- | ---: | ---: | ---: |
+| `det=-2.0 pref=1` | `6.684e-05` | `8.735e-05` | `0.77` |
+| `det=-2.0 pref=4` | `1.131e-04` | `2.133e-04` | `0.53` |
+| `det=-1.0 pref=1` | `1.088e-03` | `7.407e-04` | `1.47` |
+| `det=-1.0 pref=16` | `4.231e-03` | `2.814e-03` | `1.50` |
+| `det=+0.0 pref=1` | `5.954e-05` | `1.371e-05` | `4.34` |
+| `det=+0.0 pref=16` | `2.641e-05` | `2.153e-04` | `0.12` |
+| `det=+0.5 pref=4` | `3.178e-03` | `9.620e-04` | `3.30` |
+| `det=+0.5 pref=16` | `4.865e-04` | `9.592e-05` | `5.07` |
+| `det=+1.5 pref=16` | `1.951e-05` | `5.241e-05` | `0.37` |
+
+Magnus wins `11` of `15`. **Worst cell, which is what certifies a scan:
+`4.231e-03` against `2.814e-03`, a `1.50x` improvement.** Three of the four
+regressions are at prefactor `4` or `16`, which is the expected direction --
+`||A||` grows with the drive and so does the neglected second Magnus term.
+
+Re-scored 2026-08-28 against `magnus@128000` with a per-cell floor from
+cross-method disagreement and Magnus self-convergence, the four losses **survive**
+-- floors are `10-50x` below them, so they are resolvable rather than noise.
+Magnus still wins `11/15` and improves the binding cell from `4.507e-03` to
+`2.538e-03` (`1.78x`). Note that reference is Magnus's own fine run and so
+flatters Magnus; its wins may be overstated and its losses understated. Every
+regressing cell has absolute error `<= 2.2e-04`, against `2.8e-03` in the
+binding cell. A strict "no cell may regress" gate rejects this; a gate on
+worst-case accuracy accepts it comfortably. Recording both readings rather than
+silently picking one: the strict gate was written before the error distribution
+across the grid was known, and rejecting a method for degrading cells already
+`20x` better than the binding constraint repeats the error of scoring on a
+quantity that does not bound the result.
+
+### Not Yet Established
+
+- **The multitone path is untested.** `make_magnus_loop` replaces only
+  `_time_evolve_mu_batched_shared_slow`. The multitone loop carries a beat phase
+  `exp(-i * delta_omega * t_sample)` inside `H_rot`; a Magnus step that freezes
+  it rather than integrating it across the step would be wrong in a way no
+  single-tone test can reveal.
+- **The `n^3` second-Magnus-term objection stands** and is metric-independent.
+  It bounds any attempt to push this to higher order, though it does not affect
+  the first-order-Magnus result measured here.
+- Only one lineshape window was used for the wall-clock table; the grid table
+  above is single-shot per cell, with no repeats.
+
+### Corrected: Midpoint Is The Stronger Lever, Measured On Lineshapes
+
+> **Superseded.** the direction is right but the reference is a two-discretisation average with `3.991e-04` of its own uncertainty. Superseded by the closed-form measurement in *Magnus At Production `delta*dt`*, which gives `45x` for midpoint over left-endpoint on a commuting model.
+
+The rejection of midpoint sampling recorded below used `max|dP|` at fixed
+detunings, which the conditioning section above shows cannot measure convergence
+here. Re-tested on the lineshape residual, over `det` from `-1.10` to
+`-0.90 MHz`, against a reference built from **two different discretisations**
+(`left-uniform` and `mid-graded`, both at `N=64000`) whose mutual disagreement is
+`3.991e-04`:
+
+| `N_steps` | `left-uniform` | `mid-uniform` | `left-graded` | `mid-graded` |
+| ---: | ---: | ---: | ---: | ---: |
+| `1000` | `9.165e-03` | `2.937e-03` | `3.380e-03` | `3.248e-03` |
+| `2000` | `4.687e-03` | `1.830e-03` | `4.817e-03` | `1.175e-03` |
+| `4000` | `2.942e-03` | `2.416e-03` | `2.942e-03` | `2.214e-03` |
+| `8000` | `1.526e-03` | `1.444e-03` | `1.544e-03` | `1.106e-03` |
+| `16000` | `7.144e-04` | `6.748e-04` | `5.984e-04` | `5.157e-04` |
+
+Step-count saving at matched residual, against `left-uniform`:
+
+| variant | `1000` | `2000` | `4000` | `8000` | `16000` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `mid-uniform` | `4.01x` | `3.30x` | `1.23x` | `1.05x` | `1.00x` |
+| `left-graded` | `3.25x` | `0.97x` | `1.00x` | `0.99x` | `1.00x` |
+| `mid-graded` | `3.45x` | `5.08x` | `1.35x` | `1.34x` | `1.00x` |
+
+- **Midpoint alone beats grading alone** (`4.01x` against `3.25x` at `1000`,
+  `3.30x` against `0.97x` at `2000`), costs nothing per step, and needs no
+  density pre-pass.
+- **They compose sub-multiplicatively.** At `2000`, midpoint gives `3.30x`,
+  grading alone `0.97x`, together `5.08x`.
+- **The gain is concentrated at coarse step counts**: `3.4-5x` below `2000`,
+  about `1.35x` at `8000`, unmeasurable at `16000`.
+- Midpoint is still **not second order** -- residual ratios per doubling are
+  `1.5-1.8`, not `4`. It lowers the error constant by about `3x` and leaves the
+  order at `1`. Why the scheme stays first order is unresolved; the obvious
+  suspect, a low-order field interpolant, is ruled out because `Ez_from_csv`
+  uses cubic interpolation, so `H` is C2 in time.
+
+The `16000` row is at the noise floor: residuals of `5-7e-04` against a
+reference good to `3.991e-04`. Read it as unmeasurable rather than as no gain.
+
+**Implication for the `1.58x` ceiling.** That ceiling bounds step *placement*
+only. Midpoint moves the error constant, a different axis, which is why the
+combination reaches `5.08x` at `N=2000`. Neither changes the convergence order,
+so both gains shrink as the accuracy target tightens.
+
+### Superseded: Midpoint Sampling Measured With The Broken Metric
+
+> **Superseded.** This subsection calls midpoint "rejected". It is the shipped
+> default, is second order against exact solutions where left-endpoint is first,
+> and is `45x` more accurate at production `delta*dt` on a commuting model. The
+> text is kept for the reasoning that led to the wrong call.
+
+All four loops evaluate `H` at the left endpoint (`simulator.py:1505`, `:1641`,
+`:1795`, `:1939`). The step is exact for a frozen `H`, so the only time-sampling
+error is the time-ordering term: `O(dt^2)` per step, `O(dt)` globally, and
+`H(t + dt/2)` costs the same. Measured on the `det=-1.0` cells, midpoint is
+better at some step counts and worse at others with no systematic advantage;
+both reach about `1e-03` by `4000`. Selected indices were `(14, 35)` throughout.
+
+The prediction was that the left-endpoint diagonal phase error `delta'*dt^2/2`
+dominates and midpoint cancels it exactly. It does cancel it -- but that term is
+a per-eigenstate *phase*, and the observable is populations in that same
+instantaneous eigenbasis, so cancelling it does not move the answer. Fourth
+propagator change rejected here after Strang, Lie and Magnus, and for the same
+reason: an error-term argument accepted before it was measured.
+
+Caveat: the midpoint comparison was scored against a uniform reference at
+`64000`, before the reference problem above was understood. Both schemes were
+scored symmetrically against it, so the conclusion is unlikely to invert, but it
+has **not** been re-scored against `G256`.
+
+### Also A No-Op: An Endpoint Readout Basis
+
+After the loop `psis` is at `T` but `last_evecs`/`V_fin` is the basis at the last
+*sampled* time -- `T-dt` today. Re-diagonalising at exactly `t=T` and reordering
+onto the tracking chain (with `V_fin` repointed at it, since `population()` reads
+labels from `V_fin` and the probabilities must share that basis) moves `V_fin` by
+`2.126e-04` and `probabilities_final` by `2.119e-08`. Quadratic, because the
+readout state is already essentially an eigenstate, so the first-order term
+vanishes by orthogonality.
+
+### What This Actually Found
+
+Not a speedup. Three things worth more than one:
+
+1. **`N_steps=128000` uniform is not converged**, and any figure referenced to a
+   finer run of the *same* scheme carries a bias that grows as the comparison
+   tightens. Referenced runs in this repository should be re-read with that in
+   mind.
+2. **Worst-case convergence on this grid is set by one cell**, `det=-1.0`, which
+   does not converge reliably under either grid anywhere from `500` to `24000`
+   steps, while every other cell reaches `1e-05` or better. Production runs at
+   `10000-20000` therefore carry roughly `1e-03` in that cell.
+3. **The graded grid is the more accurate discretisation**, by the reference-free
+   test and by `10-100x` in error on the cells that behave. It is available if
+   the certifying cell is ever brought under control.
+
+The time grid is bounded and now implemented. Its ceiling is `1.58x`, grading
+reaches for it correctly once the step cap is removed, and `||dH/dt||` is the
+right monitor of the four tried. Grading is worth `10-100x` in error on
+well-conditioned cells and `5.6x` in effective detuning at `N_steps=1000`; it is
+a wash in the steep partial-transfer regime. Whether to cut `N_steps` is a
+per-observable judgement, and `benchmarks/bench_step_grid.py` is the tool for it.
+
+What is left open is not numerics:
+
+**Is the `det=-1.0` regime a useful place to take data?** The observable there
+swings `0.177` across `100 kHz` and is exponentially sensitive to the Rabi rate
+at a crossing `2.75 sigma` out in the beam wing. That is a statement about the
+experiment, not the simulation, and it bounds how precisely any prediction in
+that regime can be compared to a measurement.
+
+Raw values: `scratch_sweep.json`, `scratch_refs.json` in the repository root,
+written by ad-hoc scripts during the session and untracked; delete them freely.
+`benchmarks/bench_step_grid.py` reproduces the measurements but does not write
+those two files.
+
 ## Re-Prioritization Of The Existing Backlog
 
 | Existing item | Status after this review |
