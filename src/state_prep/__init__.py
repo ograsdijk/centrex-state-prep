@@ -80,6 +80,8 @@ from .simulator import (
     MicrowaveScanResult,
     SimulationResult,
     Simulator,
+    build_time_grid,
+    field_variation_density,
     limit_blas_threads,
 )
 from .trajectory import Trajectory
@@ -128,6 +130,8 @@ __all__ = [
     "SimulationResult",
     "MicrowaveScanResult",
     "limit_blas_threads",
+    "build_time_grid",
+    "field_variation_density",
     "scan_grid",
     "SCAN_STORAGE_DEFAULTS",
     # plotting and helpers

@@ -55,6 +55,185 @@ def limit_blas_threads(limit: Optional[int]) -> Iterator[None]:
         yield
 
 
+def _sample_offset(time_sampling: str) -> float:
+    """Fraction of the step at which `H` is evaluated.
+
+    `"mid"` evaluates `H(t + dt/2)`, `"left"` evaluates `H(t)`. The step is
+    exact for a frozen `H` either way, so this only changes which value is
+    frozen, and it costs nothing: `h_slow_eval` is under `1%` of wall clock.
+
+    **Against exact solutions, midpoint is second order and left-endpoint is
+    first** -- measured as `2.00` and `1.00` per doubling on analytically
+    solvable models (`benchmarks/analytic_models.py`, `tests/test_analytic.py`).
+
+    On the real problem it does not look that way, and the reason is understood
+    rather than mysterious. The observed order leaves its asymptotic value once
+    `delta*dt` exceeds about `1` **and** `H(t)` fails to commute with itself at
+    different times, because the neglected terms are time-ordering commutators
+    carrying powers of `delta*dt`. Measured on the models: a commuting `H` holds
+    order `2.00` at `delta*dt = 2e+02`, while a non-commuting one gives `-0.45`
+    at `2e+01`. SPA2 runs at `delta*dt ~ 7.65e+04` with a non-commuting `H`, so
+    no asymptotic power law is reachable there -- `delta*dt ~ 1` would need
+    `N ~ 7.6e+08` steps.
+
+    What that buys in practice is therefore a smaller error constant rather than
+    a better rate. On a `scalar` model at production `delta*dt`, left-endpoint
+    saturates near `0.4` with no convergence at all while midpoint holds order
+    `2` and reaches `9.0e-03` -- a `45x` gap. On the SPA2 lineshape the measured
+    saving was about `4x` fewer steps at `N_steps=1000` and `3.3x` at `2000`,
+    with no measurable difference by `16000`; those figures come from a
+    two-discretisation reference whose own uncertainty is `4.0e-04`, so treat
+    them as indicative rather than tight.
+    """
+    if time_sampling == "mid":
+        return 0.5
+    if time_sampling == "left":
+        return 0.0
+    raise ValueError(
+        f"time_sampling must be 'mid' or 'left'; got {time_sampling!r}"
+    )
+
+
+def field_variation_density(
+    H_slow_t: Callable[[float], np.ndarray],
+    muw_hams: Optional[List[Callable[[float], np.ndarray]]] = None,
+) -> Callable[[np.ndarray], np.ndarray]:
+    """Build the default step-density function, `||dH/dt||_2`.
+
+    Returns a callable suitable for `build_time_grid(density=...)`: given an
+    array of probe times it returns the spectral norm of a central difference of
+    the total Hamiltonian, slow part plus every microwave field.
+
+    This is the quantity to grade on. Three alternatives were measured and none
+    beat it: the Magnus commutator `||[H, dH/dt]||` returns the same grid to
+    within 5% of one step, because the dominant energy differences are the
+    near-constant rotational splittings; the eigenbasis rotation rate `||dV/dt||`
+    is no better; and grading on the microwave envelope alone is far worse,
+    which is the result that shows the error really is dominated by where this
+    quantity is large.
+    """
+    fields = list(muw_hams or [])
+
+    def density(ts: np.ndarray) -> np.ndarray:
+        ts = np.asarray(ts, dtype=float)
+        if ts.size < 2:
+            return np.ones(ts.size)
+        lo_bound, hi_bound = float(ts[0]), float(ts[-1])
+        h = 0.5 * float(ts[1] - ts[0])
+        out = np.empty(ts.size, dtype=float)
+        for i, t in enumerate(ts):
+            lo = min(max(float(t) - h, lo_bound), hi_bound)
+            hi = min(max(float(t) + h, lo_bound), hi_bound)
+            d = H_slow_t(hi) - H_slow_t(lo)
+            for H_mu_t in fields:
+                d = d + (H_mu_t(hi) - H_mu_t(lo))
+            out[i] = np.linalg.norm(d, 2) / (hi - lo)
+        return out
+
+    return density
+
+
+def build_time_grid(
+    T: float,
+    N_steps: int,
+    *,
+    density: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    order: int = 1,
+    max_ratio: float = 64.0,
+    probes: int = 400,
+) -> np.ndarray:
+    """Integration times over `[0, T]`, uniform by default or graded by `density`.
+
+    With `density=None` this returns `np.linspace(0, T, N_steps)` and nothing
+    about a run changes. Otherwise steps are placed by equidistributing
+    `density(t)**(1/(order+1))`, which concentrates them where the fields move
+    and stretches them where the fields are quiet.
+
+    The grid has exactly `N_steps` points either way: grading redistributes
+    steps, it does not remove them. The saving is realised by the caller then
+    passing a smaller `N_steps` for the same accuracy.
+
+    `order` is the assumed global convergence order `p`, entering through the
+    optimality condition `g**(1/(p+1)) * dt = const` for a local error density
+    `g * dt**(p+1)`.
+
+    It is a modelling assumption used to shape the grid, and deliberately not
+    tied to the propagator's formal order. `time_sampling` now defaults to
+    `"mid"`, which is second order against exact solutions, so `p=2` might look
+    like the natural choice -- but at the production `delta*dt ~ 7.65e+04` no
+    asymptotic power law is reachable, so neither `p` describes the observed
+    error. `order=1` is kept because it produces the more aggressive grid and
+    was the setting every measurement here used; changing it is an empirical
+    question, not a corollary of the default flip.
+
+    `max_ratio` caps a step at that multiple of the uniform step. The default is
+    effectively no cap -- equidistribution on a realistic trajectory saturates
+    well below it. A low cap is a mistake worth naming, since it silently
+    removes most of the benefit: `exp(-i H dt)` is exact for constant `H`, so a
+    quiet region tolerates a long step, and its eigenvectors are barely rotating
+    there so adiabatic tracking is not at risk either.
+
+    How much this can buy is bounded by the trajectory, not by the tuning. Local
+    error goes as `g * dt**2`, so a region with `1/250` the density supports only
+    `sqrt(250) ~ 16x` longer steps. On the SPA2 setup the ceiling is `1.58x` at
+    `p=1` and `1.39x` at `p=2` -- arithmetic on a sampled `||dH/dt||` profile,
+    so it is a bound on step placement and not a measured speedup.
+    """
+    if N_steps < 2:
+        raise ValueError("N_steps must be >= 2")
+    if density is None:
+        return np.linspace(0, T, N_steps)
+    if order < 1:
+        raise ValueError("order must be >= 1")
+    if max_ratio <= 1.0:
+        raise ValueError("max_ratio must be > 1")
+    if probes < 2:
+        raise ValueError("probes must be >= 2")
+
+    ts = np.linspace(0.0, float(T), int(probes))
+    g = np.asarray(density(ts), dtype=float)
+    if g.shape != ts.shape:
+        raise ValueError(f"density must return one value per probe, got {g.shape}")
+    if not np.all(np.isfinite(g)) or np.any(g < 0):
+        raise ValueError("density must be finite and non-negative")
+    if g.max() <= 0:
+        return np.linspace(0, T, N_steps)
+
+    weight = np.maximum(g, g.max() * 1e-12) ** (1.0 / (order + 1))
+
+    # Flooring the weight caps the step, since a step is inversely proportional
+    # to it. The floor has to be solved for rather than set directly: raising it
+    # also raises the mean weight, which lengthens every step, so a floor of
+    # `mean/max_ratio` computed from the *unfloored* mean overshoots the cap by
+    # however much the mean moved. The fixed point of
+    # `f = mean(max(w, f)) / max_ratio` makes the longest step exactly
+    # `max_ratio` times the uniform one, and iterating converges monotonically.
+    floor = float(np.trapezoid(weight, ts)) / float(T) / max_ratio
+    for _ in range(64):
+        mean_weight = float(np.trapezoid(np.maximum(weight, floor), ts)) / float(T)
+        updated = mean_weight / max_ratio
+        if abs(updated - floor) <= 1e-14 * updated:
+            floor = updated
+            break
+        floor = updated
+    weight = np.maximum(weight, floor)
+
+    cumulative = np.concatenate(
+        [[0.0], np.cumsum(0.5 * (weight[1:] + weight[:-1]) * np.diff(ts))]
+    )
+    cumulative /= cumulative[-1]
+    grid = np.interp(np.linspace(0.0, 1.0, N_steps), cumulative, ts)
+    grid[0], grid[-1] = 0.0, float(T)
+
+    if not np.all(np.diff(grid) > 0):
+        raise ValueError(
+            "graded time grid is not strictly increasing: the density is too "
+            "sharply peaked for N_steps={} at probes={}. Raise N_steps, lower "
+            "probes, or smooth the density.".format(N_steps, probes)
+        )
+    return grid
+
+
 @dataclass
 class SimulationResult:
     """
@@ -88,6 +267,8 @@ class SimulationResult:
     monitor_probabilities_final: Optional[np.ndarray] = None
     # Diagnostic from LabelGapTracker; see `unreliable_labels`.
     label_gaps: Optional[dict] = None
+    time_grid: str = "uniform"
+    time_sampling: str = "mid"
 
     def __post_init__(self):
         # Generate array of positions
@@ -545,6 +726,8 @@ class MicrowaveScanResult:
     V_fin: Optional[np.ndarray] = None
     # Diagnostic from LabelGapTracker; see `unreliable_labels`.
     label_gaps: Optional[dict] = None
+    time_grid: str = "uniform"
+    time_sampling: str = "mid"
 
     @property
     def batch_size(self) -> int:
@@ -867,6 +1050,23 @@ class Simulator:
         self.psis = np.array([])
         self.initial_states = []
 
+    def _resolve_step_density(self, step_density, H_slow_t, muw_hams):
+        """Turn the public `step_density` argument into a density callable."""
+        if step_density is None:
+            return None
+        if isinstance(step_density, str):
+            if step_density != "auto":
+                raise ValueError(
+                    f"step_density must be None, 'auto', or a callable; got {step_density!r}"
+                )
+            return field_variation_density(H_slow_t, muw_hams)
+        if callable(step_density):
+            return step_density
+        raise ValueError(
+            "step_density must be None, 'auto', or a callable taking an array of "
+            f"times and returning one density per time; got {type(step_density).__name__}"
+        )
+
     def run(
         self,
         N_steps=int(1e4),
@@ -881,6 +1081,9 @@ class Simulator:
         store_final_monitor_probabilities: bool = True,
         eig_backend: str = "zheevd",
         blas_threads: Optional[int] = 1,
+        step_density=None,
+        step_density_order: int = 2,
+        time_sampling: str = "mid",
     ):
         """
         Runs the simulation.
@@ -915,6 +1118,62 @@ class Simulator:
             scoped to this call and restored afterwards, so it does not affect
             other work in the same session. Pass None to leave BLAS
             configuration alone.
+
+        step_density:
+            Placement of the integration timesteps.
+            - None (default): a uniform grid, identical to previous behaviour.
+            - "auto": grade the grid by `||dH/dt||`, concentrating steps where
+              the fields move.
+
+              **On an SPA2-like trajectory this makes accuracy worse, by
+              `1.8-4.2x`.** Measured against closed-form solutions at production
+              `delta*dt`. Equidistribution does reduce the summed local error
+              (`1.7-2.2x`), but a uniform grid's leading error telescopes to a
+              boundary term worth `14-18x`, and a non-uniform grid forfeits that.
+
+              It wins where a large fraction of the run is *static*: `100-245x`
+              on a pulse that is quiet for `97%` of its window. The ceiling is
+              `1/f` for active fraction `f`, and it must comfortably exceed the
+              cancellation ratio -- order `14x`, not `1x` -- to pay. SPA2's
+              ceiling is `1.58x`, which is why it loses there.
+
+              Estimate the ceiling before enabling it; no propagation needed:
+
+                  d = field_variation_density(H_slow, muw_hams)(ts)
+                  ceiling = T * trapezoid(d, ts) / trapezoid(sqrt(d), ts)**2
+
+              Costs one extra pass of 400 Hamiltonian evaluations, `+0.92%` of
+              wall clock at `N_steps=10000`, batch `6`, `n=64`. Fixed cost, so a
+              larger share on shorter runs.
+            - a callable `f(times) -> densities` for a custom monitor.
+            See `build_time_grid`.
+
+        step_density_order:
+            Grading aggressiveness, entering as `density**(1/(order+1))`. Larger
+            values grade less and approach a uniform grid, which is the
+            `order -> infinity` limit. Ignored unless `step_density` is set.
+
+            Defaults to `2`. Measured against closed-form solutions on a model
+            matched to SPA2's geometry and level motion, `order=2` beat `order=1`
+            by about `2.3x` at every step count, and the same ordering held on
+            the earlier sweeps. The reason is that less aggressive grading gives
+            up less of the error cancellation a uniform grid enjoys, which
+            matters whenever the available gain is small.
+
+            On a problem with a much larger ceiling -- a long static stretch, so
+            a small active fraction -- the trade reverses and `order=1` may win.
+            Measure rather than assume; the value is exposed precisely because it
+            is problem-dependent.
+
+        time_sampling:
+            Where in each step `H` is evaluated. "mid" (default) uses
+            `H(t + dt/2)`, "left" uses `H(t)` and reproduces results from before
+            this option existed. Midpoint costs nothing per step and is second
+            order against exact solutions where left-endpoint is first. At the
+            production `delta*dt` no asymptotic order is reachable, so the gain
+            shows up as a smaller error constant: about 4x fewer steps at
+            `N_steps=1000`, 3.3x at 2000, and no measurable difference by 16000.
+            See `_sample_offset`.
         """
         if store_every < 1:
             raise ValueError("store_every must be >= 1")
@@ -925,6 +1184,7 @@ class Simulator:
         H_t = self.hamiltonian.get_H_t_func()
 
         # Generate Hamiltonians for microwaves
+        muw_hams: Optional[List[Callable[[float], np.ndarray]]] = None
         if self.microwave_fields is not None:
             # Initialize matrix for shifting energies in rotating frame
             D_mu = np.zeros((len(self.hamiltonian.QN), len(self.hamiltonian.QN)))
@@ -966,7 +1226,12 @@ class Simulator:
                 return H_mu_tot
 
         # Generate integration time array
-        t_array = np.linspace(0, T, N_steps)
+        t_array = build_time_grid(
+            T,
+            N_steps,
+            density=self._resolve_step_density(step_density, H_t, muw_hams),
+            order=step_density_order,
+        )
 
         # Indices to store output (downsampled)
         save_idx = np.arange(0, N_steps, store_every, dtype=int)
@@ -1001,6 +1266,7 @@ class Simulator:
                     store_monitor_probabilities=store_monitor_probabilities,
                     store_final_monitor_probabilities=store_final_monitor_probabilities,
                     eig_backend=eig_backend,
+                    time_sampling=time_sampling,
                 )
             else:
                 (
@@ -1027,6 +1293,7 @@ class Simulator:
                     store_monitor_probabilities=store_monitor_probabilities,
                     store_final_monitor_probabilities=store_final_monitor_probabilities,
                     eig_backend=eig_backend,
+                    time_sampling=time_sampling,
                 )
 
         # Generate a result object
@@ -1048,6 +1315,8 @@ class Simulator:
             V_ini=V_ini,
             V_fin=V_fin,
             label_gaps=getattr(self, "_label_gaps", None),
+            time_grid="uniform" if step_density is None else "graded",
+            time_sampling=time_sampling,
         )
 
         return result
@@ -1089,6 +1358,9 @@ class Simulator:
         parallel_backend: str = "loky",
         allow_multitone_same_manifold: bool = False,
         blas_threads: Optional[int] = 1,
+        step_density=None,
+        step_density_order: int = 2,
+        time_sampling: str = "mid",
     ) -> MicrowaveScanResult:
         """Run a batched microwave scan reusing the slow diagonalization.
 
@@ -1150,6 +1422,48 @@ class Simulator:
         - The limit is scoped to the evolution loop and restored afterwards, so
           it does not affect other work in the same session.
         - Pass None to leave BLAS configuration untouched.
+
+        Timestep placement:
+        - `step_density=None` (default) uses a uniform grid, unchanged from
+          previous behaviour.
+        - `step_density="auto"` grades the grid by `||dH/dt||`, concentrating
+          steps where the fields move and stretching them where the fields are
+          quiet, so a given accuracy needs fewer steps. The grid depends only on
+          the trajectory, the DC fields and the beam envelope -- never on
+          detuning or prefactor -- so a single grid is shared across the whole
+          batch and the shared slow diagonalization is preserved.
+        - The gain is bounded by the trajectory: about `1.58x` on the SPA2
+          setup. It is not a free lunch on accuracy either, and worst-case cells
+          may not show it. Verify with `benchmarks/bench_step_grid.py` before
+          relying on a reduced `N_steps`.
+        - A callable is also accepted; under `workers>1` it must be
+          dill-picklable, since loky ships it to each worker.
+        - `step_density_order` tunes how aggressively the grid is graded; see
+          `run` for why no value is recommended.
+
+        One grid is built for the whole scan, before the loop, and shared by
+        every scan point. That is required: a per-point grid would fork the batch
+        and lose the shared slow diagonalization. Consequences:
+
+        - **Detuning never affects the grid.** It enters through `D_mu`, which is
+          not part of the density.
+        - **Power affects it only through the slow-to-microwave ratio.** The
+          density is `||d(H_slow + H_mu)/dt||`, a norm of a *sum*, so scaling the
+          coupling changes the grid's shape rather than just its scale. On SPA2
+          that ratio is about `3.3e+03` at the beam, and since coupling goes as
+          `sqrt(intensity)`, parity needs an intensity prefactor near `1e+07`.
+          Measured: prefactor `16` moves the grid by `0.56` of a uniform step.
+        - The case to watch is a scan spanning a *regime change*, from
+          microwave-negligible to microwave-dominant. One grid then suits neither
+          end. Checkable without propagating anything, by comparing
+          `field_variation_density` at the extreme prefactors.
+
+        Timestep sampling:
+        - `time_sampling="mid"` (default) evaluates `H(t + dt/2)`; `"left"`
+          evaluates `H(t)` and reproduces results from before this option
+          existed. Midpoint is free and reaches a given accuracy in about 4x
+          fewer steps at `N_steps=1000` and 3.3x at 2000, converging to no
+          measurable difference by 16000.
         """
         if N_steps < 2:
             raise ValueError("N_steps must be >= 2")
@@ -1234,6 +1548,9 @@ class Simulator:
                 workers=workers,
                 allow_multitone_same_manifold=allow_multitone_same_manifold,
                 blas_threads=blas_threads,
+                step_density=step_density,
+                step_density_order=step_density_order,
+                time_sampling=time_sampling,
             )
 
         # Build per-microwave H_mu(t) functions (shared across batch)
@@ -1256,7 +1573,12 @@ class Simulator:
 
         H_t = self.hamiltonian.get_H_t_func()
         T = self.trajectory.get_T()
-        t_array = np.linspace(0, T, N_steps)
+        t_array = build_time_grid(
+            T,
+            N_steps,
+            density=self._resolve_step_density(step_density, H_t, muw_hams),
+            order=step_density_order,
+        )
 
         if multitone_jes:
             component_hams = [
@@ -1306,6 +1628,7 @@ class Simulator:
                     store_final_monitor_probabilities=store_final_monitor_probabilities,
                     progress=progress,
                     eig_backend=eig_backend,
+                    time_sampling=time_sampling,
                 )
         else:
             with limit_blas_threads(blas_threads):
@@ -1326,6 +1649,7 @@ class Simulator:
                     store_final_monitor_probabilities=store_final_monitor_probabilities,
                     progress=progress,
                     eig_backend=eig_backend,
+                    time_sampling=time_sampling,
                 )
 
         return MicrowaveScanResult(
@@ -1342,6 +1666,8 @@ class Simulator:
             V_ini=V_ini,
             V_fin=V_fin,
             label_gaps=getattr(self, "_label_gaps", None),
+            time_grid="uniform" if step_density is None else "graded",
+            time_sampling=time_sampling,
         )
 
     def _run_microwave_scan_parallel_loky(
@@ -1358,6 +1684,9 @@ class Simulator:
         workers: int,
         allow_multitone_same_manifold: bool,
         blas_threads: Optional[int] = 1,
+        step_density=None,
+        step_density_order: int = 2,
+        time_sampling: str = "mid",
     ) -> MicrowaveScanResult:
         batch = int(detunings_hz.shape[0])
         n_jobs = min(effective_n_jobs(workers), batch)
@@ -1375,6 +1704,9 @@ class Simulator:
                 parallel_backend="loky",
                 allow_multitone_same_manifold=allow_multitone_same_manifold,
                 blas_threads=blas_threads,
+                step_density=step_density,
+                step_density_order=step_density_order,
+                time_sampling=time_sampling,
             )
 
         chunk_indices = np.array_split(np.arange(batch), n_jobs)
@@ -1393,6 +1725,9 @@ class Simulator:
                 parallel_backend="loky",
                 allow_multitone_same_manifold=allow_multitone_same_manifold,
                 blas_threads=blas_threads,
+                step_density=step_density,
+                step_density_order=step_density_order,
+                time_sampling=time_sampling,
             )
 
         results = Parallel(n_jobs=n_jobs, backend="loky")(
@@ -1429,6 +1764,8 @@ class Simulator:
             V_ini=first.V_ini,
             V_fin=first.V_fin,
             label_gaps=first.label_gaps,
+            time_grid=first.time_grid,
+            time_sampling=first.time_sampling,
         )
 
     def _time_evolve_mu_batched_shared_slow(
@@ -1444,6 +1781,7 @@ class Simulator:
         store_final_monitor_probabilities: bool,
         progress: bool,
         eig_backend: str,
+        time_sampling: str = "mid",
     ):
         """Batched microwave evolution with shared slow diagonalization.
 
@@ -1497,12 +1835,14 @@ class Simulator:
         psis_batch = np.repeat(self.psis[None, :, :], batch, axis=0)
 
         last_evecs = V_ref
+        sample_offset = _sample_offset(time_sampling)
         gap_tracker = LabelGapTracker(len(self.hamiltonian.QN))
         for i, t in enumerate(tqdm(t_array[:-1], disable=not progress)):
             dt = t_array[i + 1] - t_array[i]
+            t_sample = t + sample_offset * dt
 
             # Shared slow Hamiltonian diagonalization (once per timestep)
-            H_slow_i = H_slow_t(t)
+            H_slow_i = H_slow_t(t_sample)
             if eig_backend == "zheevd":
                 D, V, info = zheevd(H_slow_i)
                 if info != 0:
@@ -1516,11 +1856,11 @@ class Simulator:
             Es, evecs = D, V
             Es, evecs = reorder_evecs(evecs, Es, V_ref)
             last_evecs = evecs
-            gap_tracker.update(Es, t)
+            gap_tracker.update(Es, t_sample)
 
             # Pre-rotate each microwave field into the slow-eigenbasis (shared across batch)
             Vh = V.conj().T
-            H_mu_rot = [Vh @ H_mu_t(t) @ V for H_mu_t in muw_hams]
+            H_mu_rot = [Vh @ H_mu_t(t_sample) @ V for H_mu_t in muw_hams]
 
             # The per-point propagator is U = A diag(ph) A^dagger with A = V @ V_rot,
             # which factors as V (V_rot diag(ph) V_rot^dagger) V^dagger. V is shared
@@ -1588,6 +1928,7 @@ class Simulator:
         store_final_monitor_probabilities: bool,
         progress: bool,
         eig_backend: str,
+        time_sampling: str = "mid",
     ):
         """Batched shared-slow evolution with beat phases for same-manifold tones."""
         if D_mu_diag_batch.ndim != 2:
@@ -1633,11 +1974,13 @@ class Simulator:
         psis_batch = np.repeat(self.psis[None, :, :], batch, axis=0)
 
         last_evecs = V_ref
+        sample_offset = _sample_offset(time_sampling)
         gap_tracker = LabelGapTracker(len(self.hamiltonian.QN))
         for i, t in enumerate(tqdm(t_array[:-1], disable=not progress)):
             dt = t_array[i + 1] - t_array[i]
+            t_sample = t + sample_offset * dt
 
-            H_slow_i = H_slow_t(t)
+            H_slow_i = H_slow_t(t_sample)
             if eig_backend == "zheevd":
                 D, V, info = zheevd(H_slow_i)
                 if info != 0:
@@ -1650,18 +1993,18 @@ class Simulator:
             Es, evecs = D, V
             Es, evecs = reorder_evecs(evecs, Es, V_ref)
             last_evecs = evecs
-            gap_tracker.update(Es, t)
+            gap_tracker.update(Es, t_sample)
 
             Vh = V.conj().T
             upper_rot: list[np.ndarray] = []
             lower_rot: list[np.ndarray] = []
             for component_t in component_hams:
-                upper, lower = component_t(t)
+                upper, lower = component_t(t_sample)
                 upper_rot.append(Vh @ upper @ V)
                 lower_rot.append(Vh @ lower @ V)
 
             beat_phases = [
-                (field_idx, np.exp(-1j * delta_omega * t))
+                (field_idx, np.exp(-1j * delta_omega * t_sample))
                 for field_idx, delta_omega in beat_fields
             ]
 
@@ -1733,6 +2076,7 @@ class Simulator:
         store_monitor_probabilities: bool,
         store_final_monitor_probabilities: bool,
         eig_backend: str,
+        time_sampling: str = "mid",
     ):
         """
         Time evolves the system using the Hamiltonian function H_t
@@ -1786,13 +2130,15 @@ class Simulator:
 
         out_i = 0
         last_evecs = V_ref
+        sample_offset = _sample_offset(time_sampling)
         gap_tracker = LabelGapTracker(len(self.hamiltonian.QN))
         for i, t in enumerate(tqdm(t_array[:-1], disable=not progress)):
             # Calculate the timestep
             dt = t_array[i + 1] - t_array[i]
+            t_sample = t + sample_offset * dt
 
             # Calculate Hamiltonian
-            H_slow_i = H_slow(t)
+            H_slow_i = H_slow(t_sample)
 
             # Diagonalize Hamiltonian
             if eig_backend == "zheevd":
@@ -1807,7 +2153,7 @@ class Simulator:
             # Reorder eigenvectors and energies
             Es, evecs = reorder_evecs(V, D, V_ref)
             last_evecs = evecs
-            gap_tracker.update(Es, t)
+            gap_tracker.update(Es, t_sample)
 
             # Apply propagator without forming U_dt:
             # For row-vector storage (each state is a row), the update is
@@ -1874,6 +2220,7 @@ class Simulator:
         store_monitor_probabilities: bool,
         store_final_monitor_probabilities: bool,
         eig_backend: str,
+        time_sampling: str = "mid",
     ):
         """
         Time evolves the system using the Hamiltonian function H_t
@@ -1930,14 +2277,16 @@ class Simulator:
 
         out_i = 0
         last_evecs = V_ref
+        sample_offset = _sample_offset(time_sampling)
         gap_tracker = LabelGapTracker(len(self.hamiltonian.QN))
         for i, t in enumerate(tqdm(t_array[:-1], disable=not progress)):
             # Calculate the timestep
             dt = t_array[i + 1] - t_array[i]
+            t_sample = t + sample_offset * dt
 
             # Calculate Hamiltonians
-            H_slow_i = H_slow_t(t)
-            H_mu_i = H_mu_t(t)
+            H_slow_i = H_slow_t(t_sample)
+            H_mu_i = H_mu_t(t_sample)
 
             # Diagonalize slow Hamiltonian and transfer to basis where it is
             # diagonal
@@ -1976,7 +2325,7 @@ class Simulator:
             Es, evecs = D, V
             Es, evecs = reorder_evecs(evecs, Es, V_ref)
             last_evecs = evecs
-            gap_tracker.update(Es, t)
+            gap_tracker.update(Es, t_sample)
 
             # Compute the propagator
             # Combine the unitary matrices
