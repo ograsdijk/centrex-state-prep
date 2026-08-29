@@ -43,7 +43,7 @@ from common import (
     write_results,
 )
 from state_prep import Simulator, scan_grid
-from state_prep.utils import find_max_overlap_idx, reorder_evecs
+from state_prep.utils import LabelGapTracker, find_max_overlap_idx, reorder_evecs
 
 SHIPPED = Simulator._time_evolve_mu_batched_shared_slow
 
@@ -162,6 +162,11 @@ def make_magnus_loop():
                 return w, v
             return np.linalg.eigh(M)
 
+        # The shipped loops track level crossings here, and the result reads
+        # `label_gaps` off the Simulator with `getattr(self, "_label_gaps", None)`.
+        # Without this a Magnus run silently inherits whatever a *previous* run
+        # left on the instance -- stale crossing diagnostics on a fresh result.
+        gap_tracker = LabelGapTracker(len(self.hamiltonian.QN))
         last_evecs = V_ref
         for i, t in enumerate(t_array[:-1]):
             dt = t_array[i + 1] - t_array[i]
@@ -169,8 +174,9 @@ def make_magnus_loop():
 
             H_slow_i = H_slow_t(t_sample)
             D, V = eig(H_slow_i)
-            _, evecs = reorder_evecs(V, D, V_ref)
+            Es, evecs = reorder_evecs(V, D, V_ref)
             last_evecs = evecs
+            gap_tracker.update(Es, t_sample)
 
             Vh = V.conj().T
             H_mu_rot = [Vh @ H_mu_t(t_sample) @ V for H_mu_t in muw_hams]
@@ -196,6 +202,7 @@ def make_magnus_loop():
         mon = None
         if store_final_monitor_probabilities and monitor_idx is not None:
             mon = np.abs(psis_batch @ last_evecs[:, monitor_idx].conj()) ** 2
+        self._label_gaps = gap_tracker.summary(self.trajectory.get_T())
         return psis_batch, probs, mon, V_ref_ini, V_ref
 
     return impl
@@ -250,14 +257,14 @@ def main() -> None:
     )
 
     for n_steps in args.n_steps:
-        times = {"exact": [], "magnus": []}
+        times = {"frozen": [], "magnus": []}
         results = {}
         # Interleaved rounds, per the protocol in IMPROVEMENTS.md: never run all
         # of one variant then all of the other.
         for _ in range(args.repeat):
-            for name in ("exact", "magnus"):
+            for name in ("frozen", "magnus"):
                 Simulator._time_evolve_mu_batched_shared_slow = (
-                    SHIPPED if name == "exact" else magnus_impl
+                    SHIPPED if name == "frozen" else magnus_impl
                 )
                 try:
                     start = time.perf_counter()
@@ -274,12 +281,12 @@ def main() -> None:
                 finally:
                     Simulator._time_evolve_mu_batched_shared_slow = SHIPPED
 
-        p_exact = np.asarray(results["exact"].probabilities_final)
+        p_exact = np.asarray(results["frozen"].probabilities_final)
         p_magnus = np.asarray(results["magnus"].probabilities_final)
         max_diff = float(np.max(np.abs(p_exact - p_magnus)))
 
-        m_exact = float(np.mean(times["exact"]))
-        s_exact = float(np.std(times["exact"]))
+        m_exact = float(np.mean(times["frozen"]))
+        s_exact = float(np.std(times["frozen"]))
         m_magnus = float(np.mean(times["magnus"]))
         s_magnus = float(np.std(times["magnus"]))
         speedup = m_exact / m_magnus
