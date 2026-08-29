@@ -1,5 +1,25 @@
 """Timestep convergence over a (detuning x coupling) grid.
 
+**This benchmark's metric is unreliable, and its default grid triggers the
+failure.** It compares `probabilities_final` elementwise at *fixed* detunings.
+Near a steep part of the lineshape that measures the slope rather than
+discretisation error: on SPA2 `d(population)/d(detuning)` reaches `6e-03` per
+kHz, so an effective error of `0.2 kHz` -- far smaller than any step count will
+remove -- shows up as `1e-03` of population and refuses to fall with `N_steps`.
+`det=-1.0 MHz` is in `DEFAULT_DETUNINGS_MHZ` and is exactly such a point: it sits
+on a partial Landau-Zener transfer at a crossing `2.5 sigma` out in the beam
+flank.
+
+Errors here that stop improving are therefore **not** evidence of a converged or
+unconvergeable propagator. Reading them that way cost this repository several
+reversed conclusions; see "Performance Priority E" in `IMPROVEMENTS.md`.
+
+Use `align_lineshape` in `benchmarks/common.py` instead: scan a detuning window,
+compare whole curves, and report the best-fit effective detuning shift together
+with the residual after alignment. That residual converges cleanly where this
+metric oscillates. `benchmarks/bench_analytic.py` scores against closed-form
+solutions and needs no reference at all.
+
 Convergence depends on both the detuning and the coupling strength, and not
 monotonically in either, so a single parameter point cannot certify a step
 count. The batch is therefore a grid: `intensity_prefactors` scales intensity,
