@@ -1237,6 +1237,32 @@ includes conclusions later overturned. Every claim here carries the class of
 evidence behind it, because in this investigation the evidence class -- not the
 number -- was what decided whether a conclusion survived.
 
+### A naming hazard, now fixed
+
+`exact` used to name two unrelated things, and the collision misled readers
+repeatedly:
+
+- **the reference** -- `U_exact`, `Model.exact_states`, the closed-form solution;
+- **a propagator option** -- which freezes `H` at the sample point and
+  exponentiates *that frozen matrix* exactly. The word described the matrix
+  exponential, not the evolution.
+
+So a column headed "exact error" meant *the error of the frozen propagator*, not
+*the exact error*, and it is entirely normal for Magnus to beat it. Both are
+second-order approximations of the same time-ordered exponential and both
+converge to the same closed form; to reach `1e-03` in population on the multitone
+model the frozen propagator needs `256,000` steps against Magnus's `32,000`.
+
+**The option is `propagator="frozen"`**; `PROPAGATORS == ("frozen", "magnus")`.
+It was called `"exact"` throughout the investigation and was renamed before it
+ever shipped, so there is no alias and nothing to migrate -- `"exact"` is simply
+rejected. In prose below, "frozen propagator" means `propagator="frozen"`, and
+"exact" always means the closed-form reference.
+
+This was not cosmetic. The name talked this investigation into writing "multitone
+must fall back to the exact propagator" into a plan as a *safety rail* -- fencing
+off the more accurate path in favour of the one whose name sounded authoritative.
+
 ### Evidence classes
 
 | class | meaning | trustworthy? |
@@ -1276,8 +1302,47 @@ effective error reads as `1e-03` of population and refuses to converge.
 | Are Strang and Lie still rejected? | **Yes, now on a measurement**: `16x` worse than midpoint at production `delta*dt`, while Magnus is more accurate *and* `3.2x` faster. Correct implementations -- they show orders `2.00` and `1.00` in the clean regime. The old norm bound called them "completely wrong"; `16x` worse is bad but not meaningless | exact |
 | Why is `det=-1.0` so hard? | Not numerics. Two resonance crossings, the near one `2.5 sigma` out in the beam flank, giving *partial* Landau-Zener transfer. The observable swings `0.177` across `100 kHz` | geometry |
 | Do the four SPA2 Magnus regressions have an explanation? | **No.** `magnus_integral` cancellation, near-degenerate spectra and the `D_mu` diagonal are all ruled out. Most likely an artefact of scoring against `magnus@128000` | exact |
+| Is the frozen propagator the exact solution? | **No.** It exponentiates a *frozen* `H` exactly; `"magnus"` exponentiates an *integrated* `H` approximately. Both are second order and converge to the same closed form. To reach `1e-03` in population on the multitone model: `"frozen"` needs `256,000` steps, `"magnus"` `32,000`. It was called `"exact"` during the investigation and renamed before shipping, after the name caused a third misreading; see the naming note above | exact |
+| Is the Magnus propagator shipped? | **Yes**, `propagator="magnus"` on both entry points; `"frozen"` remains the default and stays bit-identical | timing + exact |
+| Is it faster on the real problem? | **Yes**, `2.10x` at batch `25` on the SPA2 shape. The synthetic `3.23x` overstated it: real `H_mu` is denser, so the `O(n^2 S)` Taylor series recovers less against the `O(n^3)` eigensolve it replaces | timing |
+| Does multitone Magnus work? | **Yes**, and it is now the *more accurate* path. It was landed refusing `magnus` because freezing the beat phase is wrong; the kernel now integrates it | exact |
+| Is the frozen beat phase actually a problem? | **Yes, severely.** In *populations* at `beat*dt = 0.17` rad the frozen propagator errs `1.4e-01` against Magnus's `1.7e-03`. Over `N = 4000..16000` its error does not fall at all (`2.2e-01, 1.2e-01, 1.4e-01`) while Magnus is clean order `2` | exact |
+| Was the first beat kernel correct? | **No**, it anchored the beat prefactor at the midpoint while the kernel integrates from the left endpoint. The effect is subtler than first reported: with one coupled pair the stray phase is a *gauge transformation* and changes no population. It is physical only once a second field is present -- then `5e-03` at `N=4000`, falling with `dt` | exact |
+
+### How the multitone reference is established
+
+Worth stating explicitly, because "closed form" is a claim, not evidence, and a
+wrong closed form is more dangerous than an unconverged reference -- it does not
+wobble, so nothing looks suspicious.
+
+`rotating_coupling` is checked two independent ways:
+
+1. **It solves the ODE, verified analytically.** `U = A B` with constant `a`,
+   `b`, so `i Udot U^H = a + A b A^H` in closed form -- no finite differences, no
+   time stepping, no propagator. Worst residual over `t` is `4.0e-14` absolute,
+   `2.7e-17` relative to `|H|`; `U(0) = I`; unitary to `4e-16`.
+2. **A fine product converges to it** at ratio `4.00` per refinement, i.e. the
+   independent discretisation agrees and does so at the expected order.
+
+Check 1 is the one that matters: it shares no code with the schemes it judges.
+Check 2 could in principle agree with a wrong reference if the product inherited
+the same error, which is exactly how this investigation went wrong before.
+
+The reference is good to `~1e-16` against a smallest measured error of
+`6.5e-06`, so it is roughly `1e+10` from being the limiting factor. Quote that
+ratio whenever a reference is used; the rule in this section exists because
+several earlier tables quoted errors *below* their reference's own resolution.
 
 ### Numbers that did not survive
+
+- **The Magnus speedup `3.23x`.** Measured on a synthetic model whose `H_mu` is
+  sparser than the real one. On the SPA2 shape it is `2.10x` at batch `25`. Both
+  are honest timings; the synthetic one is not the production number.
+- **"Multitone must fall back to the exact propagator."** Written as a safety
+  rail while the beat integral was underived, and correct at the time. It is now
+  backwards: `propagator="frozen"` is the one that freezes the beat, and in
+  populations it is ~`80x` worse than Magnus where `beat*dt` approaches `1` rad.
+  Note how the *name* argues for the wrong choice here.
 
 - **`10-100x` for grading, the `120x` at `N=500`, the `5.6x` effective-shift
   figure.** All self-referenced to `G256`, a graded run.
@@ -1294,6 +1359,52 @@ effective error reads as `1e-03` of population and refuses to converge.
   left-endpoint where they differ cleanly.
 - **"Why the scheme stays first order is unresolved."** It is resolved: see the
   `delta*dt` mechanism above.
+
+### What the multitone model changed
+
+For most of this investigation the multitone path had **no exact reference at
+all** -- all six analytic models drive the single-tone loop. Its Magnus branch
+was therefore scored against the frozen propagator, which agreed with it to
+`1.5e-02` and looked like confirmation. It was not: both schemes were wrong, in
+the same direction, and the comparison could not see it.
+
+`rotating_coupling` in `benchmarks/analytic_models.py` closes that gap. It is the
+driven two-level problem,
+
+    H(t) = (Delta/2) sz + (Omega/2) (exp(-i*w*t) s+ + exp(+i*w*t) s-)
+
+which is exactly a raising/lowering pair carrying a beat phase -- the structure
+the multitone loop assembles -- and it is constant in the frame rotating at `w`,
+so
+
+    U(t) = exp(-i*w*t*sz/2) exp(-i[((Delta - w)/2) sz + (Omega/2) sx] t)
+
+A fine product converges to this at ratio `4.00` per refinement, reaching
+`2.283e-05` at `1.6e+06` steps, which is what licenses using it as truth.
+
+Two ways it can be mis-parameterised, both of which produced confident wrong
+readings here before being caught:
+
+1. **Sign of the beat relative to the detuning.** `detuning - beat = -5800`
+   against `rabi = 400` is counter-rotating and transfers `0.005` of the
+   population. Every scheme then scores terribly against dynamics that are not
+   there. `test_multitone_drive_is_near_resonance` asserts against this.
+2. **Scoring amplitudes where only populations are physical.** A constant phase
+   on the raising part with its conjugate on the lowering part is `R^H (.) R` for
+   diagonal `R`. With a single coupled pair it telescopes across steps and
+   changes nothing observable -- yet it is plainly visible in the complex
+   amplitudes. Measured that way the beat-anchor defect looked like a clean
+   collapse from order `2.00` to `0.99`; in populations the two anchors were
+   **bit-identical**. Compare `abs(psi)**2`. A model with one coupled pair and
+   one field cannot see a phase convention at all, so it cannot be used to size
+   one.
+
+The payoff was real but narrower than it first looked: a genuine
+misfactorisation in shipped code, invisible to agreement between the two schemes,
+and invisible *again* to a single-field model that could only express it as
+gauge. Sizing it physically needs a second field, and there `rotating_coupling`
+runs out -- adding a static coupling breaks the closed form, so that measurement
+is differential (old anchor vs new), not against truth.
 
 ### What a reader should take away
 
