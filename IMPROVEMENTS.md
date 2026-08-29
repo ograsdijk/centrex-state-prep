@@ -1303,9 +1303,11 @@ effective error reads as `1e-03` of population and refuses to converge.
 | Does midpoint help in practice? | **Yes.** On a commuting model at production `delta*dt`, left-endpoint saturates at `4e-01` with no convergence while midpoint reaches `9.0e-03` -- `45x` | exact |
 | Does a graded grid help **on SPA2**? | **No -- it loses `1.8-4.2x`.** Measured on `spa_like`, whose level motion (`4.5e-05` of the spread) matches SPA2's measured `9.8e-05`, at production `delta*dt` against a closed form | exact |
 | Does it help anywhere? | **Yes, where the active fraction is small**: `100-245x` on a sech pulse (`~3%` active). The ceiling is `1/f` for active fraction `f`; SPA2 is `63%` active, so `1.58x`, which is too little to pay for what grading gives up | exact + theory |
-| Why does it lose by so much rather than merely failing to help? | Equidistribution *works* -- it cuts the summed local error `1.7-2.2x`. But a uniform grid's leading error telescopes to a boundary term, worth `14-18x`, and grading forfeits that. Bad trade unless `1/f` clears the cancellation ratio | exact |
+| Why does it lose by so much rather than merely failing to help? | Equidistribution *works*, but a uniform grid's leading error **telescopes** and grading forfeits that. Reproduced by `benchmarks/bench_grid_cancellation.py` on `spa_like`: placement cuts summed local error `1.32x`, while cancellation falls from `47.5x` to `8.4x` -- a `5.69x` loss. Net `5.69/1.32 = 4.3x`, matching the measured global errors (`1.757e-12` vs `7.507e-12`, `4.27x`). Bad trade unless `1/f` clears the cancellation ratio | exact |
+| How is "cancellation" defined and measured? | `sum_i \|\|U_exact_step - U_scheme_step\|\|` over `\|\|U_total - U_exact(T)\|\|` -- how much bigger the error would be if the per-step errors simply added. It needs a closed form for the exact one-step propagator, `U(t_i+1) U(t_i)^H`, so no reference run is involved. The absolute cancellation is case-dependent: the older table below reports `17.7x` uniform against `2.5x`/`4.5x` graded, from a configuration with no recorded reproducer, where this benchmark gives `47.5x`/`8.4x` on `spa_like`. What *is* stable across both is the ratio that decides the verdict -- uniform's advantage is `3.9-7.1x` there and `5.69x` here | exact |
+| Which models can test grading at all? | Only ones with a non-flat `H_slow`. `rotating_coupling` has a constant envelope, so its density is flat, the two grids nearly coincide (summed local `190.4` vs `190.5`) and the ratio is erratic -- exactly the trap that once produced a confident "grading never helps" from a model with `1.01x` density range. `engineered` reports a suspiciously `N`-independent `356.9x` and is structurally special; treat both as unusable here | geometry |
 | How much can grading buy at most? | `1.58x` at `p=1`, `1.39x` at `p=2` -- a bound on step *placement*, not a measured speedup | theory |
-| What does grading cost? | `+0.92%` at matched `N_steps` | timing |
+| What does grading cost? | Grid construction is `40.9 ms +- 0.12` against `0.006 ms` for `linspace` (7 repeats, `N=2000`). It is one-time, not per-step, so against a multi-second run that is well under `1%` -- consistent with the `+0.92%` recorded earlier from a whole-run timing | timing |
 | Is the Magnus propagator faster? | **Yes**, and the gain grows with batch because it removes the per-scan-point `O(n^3)` eigensolve. On the **real SPA2 shape**: `2.10x` at batch `25`. On a *synthetic* model with sparser `H_mu`: `3.23x` at `25`, `1.89x` at `5`, `1.23x` at `1` -- quote the real figure, not the synthetic one | timing |
 | Is Magnus as accurate? | **Yes** -- matches midpoint to four significant figures at production `delta*dt`, on two models, at every step count | exact |
 | Does a graded grid break Magnus? | **No.** Identical to midpoint on every grid. But `||A|| = ||H_mu||*dt` rises with grading when the beam sits away from the density peak (`0.044 -> 0.32` on SPA2), and the Taylor guard trips near `0.5` | exact + geometry |
@@ -1918,6 +1920,14 @@ closed form on `spa_like` at production `delta*dt`:
 Equidistribution does exactly what it claims -- it reduces the *summed* local
 error by `1.7-2.2x`. It still loses, because uniform sampling cancels `94%` of
 its local error and grading only `60-78%`.
+
+> **Reproducer added 2026-08-29.** The configuration behind this table was never
+> recorded, so `benchmarks/bench_grid_cancellation.py` re-measures the same
+> quantity from closed forms. On `spa_like` it gives `47.5x` uniform against
+> `8.4x` graded and a placement gain of `1.32x` -- different absolutes from the
+> table above, same mechanism, and the decisive ratio agrees (`5.69x` here,
+> `3.9-7.1x` above). Quote the benchmark's numbers, since those can be
+> regenerated.
 
 **The mechanism is telescoping, not phase.** On a uniform grid the midpoint
 rule's leading error sums as `Sum (dt^2/24) f''(t_i) dt -> (dt^2/24)[f'(T) -

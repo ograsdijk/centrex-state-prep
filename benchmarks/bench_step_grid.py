@@ -11,9 +11,11 @@ where the comparison measures the slope rather than discretisation error.
 
 **The graded-grid verdict is right, but not for the reason given.** Grading does
 cut the summed local error; what defeats it on SPA2 is that a uniform grid's
-leading error telescopes to a boundary term, worth `14-18x`, which grading gives
-up. The ceiling is `1/f` for active fraction `f`, and SPA2 is `63%` active. It
-does help where the active fraction is small.
+leading error telescopes to a boundary term, which grading gives up. Measured by
+`benchmarks/bench_grid_cancellation.py` on `spa_like`: cancellation `47.5x`
+uniform against `8.4x` graded, against a placement gain of only `1.32x`. The
+ceiling is `1/f` for active fraction `f`, and SPA2 is `63%` active. It does help
+where the active fraction is small.
 
 **The reasoning about phase cancellation below is also wrong.** Midpoint does not
 fail because the cancelled term is a per-eigenstate phase; it does not fail at
