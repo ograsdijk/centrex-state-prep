@@ -318,7 +318,8 @@ def main() -> None:
         print(f"VERDICT: best agreement reached is {worst:.3e}, above the target.")
     print()
     print("Note: probabilities_final is compared elementwise here. "
-          "IMPROVEMENTS.md:337 shows that is confounded by adiabatic label swaps "
+          "IMPROVEMENTS.md (\"Label Swaps Are Crossings, Not Degeneracy\") shows "
+          "that is confounded by adiabatic label swaps "
           "on the multitone path; this is the single-manifold shared-slow path, "
           "where the same run agrees to 4.378e-07 across eigensolver backends.")
 

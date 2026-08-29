@@ -1,9 +1,10 @@
 """The interaction-picture Magnus propagator.
 
 It replaces the per-scan-point eigensolve of `H_rot` with a Taylor series
-applied to the state vectors: `n**2 * S` work instead of `n**3`. Measured
-`3.23x` faster at batch `25`, and identical to the exact path to four
-significant figures against closed-form solutions at production `delta*dt`.
+applied to the state vectors: `n**2 * S` work instead of `n**3`, and identical
+to the frozen path to four significant figures against closed-form solutions at
+production `delta*dt`. Speedups are machine-dependent and live in
+`IMPROVEMENTS.md`, not here.
 
 The tests that matter here are the ones a duplicated loop would fail. Magnus is
 implemented as a *branch* inside `_time_evolve_mu_batched_shared_slow`, not as a

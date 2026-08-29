@@ -1,4 +1,30 @@
-"""Midpoint sampling and a graded time grid, both measured and both rejected.
+"""Midpoint sampling and a graded time grid, measured here with a metric that
+does not work. **Both conclusions below were overturned; read this banner first.**
+
+**Midpoint is not rejected -- it is the shipped default.** `time_sampling="mid"`
+has been the default since `f75d57a`. Against closed-form solutions it is second
+order (`2.00` measured) where left-endpoint is first (`1.00`), and on a commuting
+model at production `delta*dt` left-endpoint saturates at `4e-01` with no
+convergence while midpoint reaches `9.0e-03`. The "no systematic advantage" found
+below came from comparing populations at fixed detunings near a steep lineshape,
+where the comparison measures the slope rather than discretisation error.
+
+**The graded-grid verdict is right, but not for the reason given.** Grading does
+cut the summed local error; what defeats it on SPA2 is that a uniform grid's
+leading error telescopes to a boundary term, worth `14-18x`, which grading gives
+up. The ceiling is `1/f` for active fraction `f`, and SPA2 is `63%` active. It
+does help where the active fraction is small.
+
+**The reasoning about phase cancellation below is also wrong.** Midpoint does not
+fail because the cancelled term is a per-eigenstate phase; it does not fail at
+all. See "Performance Priority E" in `IMPROVEMENTS.md`, and score against
+`benchmarks/analytic_models.py` rather than against a finer run of the same
+scheme.
+
+Original text follows, kept because the settling criterion and the label-stability
+note are still sound.
+
+Midpoint sampling and a graded time grid, both measured and both rejected.
 
 Runtime is close to linear in `N_steps` (LAPACK is over 90% of the loop body),
 so anything that cuts the step count at fixed accuracy converts almost 1:1 into
@@ -38,7 +64,8 @@ evaporated. `report()` uses a settling criterion instead -- the smallest
 `N_steps` beyond which *every* larger `N_steps` tested stays under tolerance.
 
 **Accuracy is read as quantum-number populations**, never as elementwise
-`probabilities_final`, which `IMPROVEMENTS.md:514-548` shows is confounded by
+`probabilities_final`, which `IMPROVEMENTS.md` ("Label Swaps Are Crossings, Not
+Degeneracy") shows is confounded by
 adiabatic label swaps. The selected indices were verified stable across every
 step count tested, so what the tables show is numerics rather than labelling.
 

@@ -545,8 +545,18 @@ was wrong.
   still carries this defect; the accessors now warn, but the stored values are
   unchanged by design. Anything reading them at `80000` steps or finer should
   use `population(...)` instead.
-- `20000` remains comfortably converged. The step count never needed increasing;
-  raising it is what exposed the swap.
+- `20000` remains comfortably converged **against label swaps**, which is all
+  this subsection measured. The step count never needed increasing to avoid a
+  swap; raising it is what exposed one.
+
+  > **Corrected 2026-08-29.** Do not read that as "`20000` is converged". For the
+  > RC-background cases it is not even close: the beat runs at `5.4-8.9 MHz` over
+  > a `1.52e-03 s` trajectory, so `beat*dt` is `2.6-4.3` rad per step and the
+  > frozen propagator aliases it. `depletion` at `20000` sits `~1.7e-03` from a
+  > converged answer. This sentence is why the SPA2 analyses were produced at
+  > `20000`; they have since been regenerated at `160000` with
+  > `--propagator magnus`. A convergence statement is only ever about the
+  > quantity that was measured.
 
 Full per-cell output in `results/multitone_label_audit.json`.
 
@@ -1296,23 +1306,21 @@ effective error reads as `1e-03` of population and refuses to converge.
 | Why does it lose by so much rather than merely failing to help? | Equidistribution *works* -- it cuts the summed local error `1.7-2.2x`. But a uniform grid's leading error telescopes to a boundary term, worth `14-18x`, and grading forfeits that. Bad trade unless `1/f` clears the cancellation ratio | exact |
 | How much can grading buy at most? | `1.58x` at `p=1`, `1.39x` at `p=2` -- a bound on step *placement*, not a measured speedup | theory |
 | What does grading cost? | `+0.92%` at matched `N_steps` | timing |
-| Is the Magnus propagator faster? | **Yes**, `3.23x` at batch `25`, `1.89x` at `5`, `1.23x` at `1`; it removes the per-scan-point `O(n^3)` eigensolve so the gain grows with batch | timing |
+| Is the Magnus propagator faster? | **Yes**, and the gain grows with batch because it removes the per-scan-point `O(n^3)` eigensolve. On the **real SPA2 shape**: `2.10x` at batch `25`. On a *synthetic* model with sparser `H_mu`: `3.23x` at `25`, `1.89x` at `5`, `1.23x` at `1` -- quote the real figure, not the synthetic one | timing |
 | Is Magnus as accurate? | **Yes** -- matches midpoint to four significant figures at production `delta*dt`, on two models, at every step count | exact |
 | Does a graded grid break Magnus? | **No.** Identical to midpoint on every grid. But `||A|| = ||H_mu||*dt` rises with grading when the beam sits away from the density peak (`0.044 -> 0.32` on SPA2), and the Taylor guard trips near `0.5` | exact + geometry |
-| Are Strang and Lie still rejected? | **Yes, now on a measurement**: `16x` worse than midpoint at production `delta*dt`, while Magnus is more accurate *and* `3.2x` faster. Correct implementations -- they show orders `2.00` and `1.00` in the clean regime. The old norm bound called them "completely wrong"; `16x` worse is bad but not meaningless | exact |
+| Are Strang and Lie still rejected? | **Yes, now on a measurement**: `16x` worse than midpoint at production `delta*dt`, while Magnus is more accurate *and* faster. Correct implementations -- they show orders `2.00` and `1.00` in the clean regime. The old norm bound called them "completely wrong"; `16x` worse is bad but not meaningless | exact |
 | Why is `det=-1.0` so hard? | Not numerics. Two resonance crossings, the near one `2.5 sigma` out in the beam flank, giving *partial* Landau-Zener transfer. The observable swings `0.177` across `100 kHz` | geometry |
 | Do the four SPA2 Magnus regressions have an explanation? | **Yes, resolved: they are not a property of Magnus.** Compared at the *same* `N_steps`, where both schemes share one label path, `|frozen - magnus|` shrinks in every reported cell -- `4.69e-03 -> 6.85e-05 -> 9.85e-06` over `N = 4000, 16000, 64000` -- and tracks the control cells exactly. A systematic defect would not shrink. The original `<= 2.2e-04` differences sit below the `~5e-03` discretisation floor both schemes share at `N=4000` | cross-scheme |
-| Can a fine run of either scheme settle it? | **No, and it actively misleads.** `probabilities_final` is indexed by adiabatically tracked labels and 56 of 64 cross here, so runs at different `N_steps` track independently and the same population lands in a different column. Comparing `N=4000` against `N=128000` returns `0.999` in cells whose physics is nearly identical -- a permutation, not an error | geometry |
+| Can a fine run of either scheme settle it? | **No.** `probabilities_final` is indexed by tracked labels whose *meaning* shifts with `N_steps` (see the three rows below), so the same population can land in a different column. Comparing `N=4000` against `N=128000` returns `0.999` in cells whose physics is nearly identical | geometry |
 | What does `reorder_evecs` actually do? | Keeps the ordering the run started in, by chaining each step's overlap match against the *previous* step (`V_ref = evecs`). Matching against `t=0` was considered and rejected -- see `simulator.py:707` -- because the eigenvectors rotate completely here (the SPA2 initial state is a Stark mixture `F = 2.372 +- 4.899` at `t=0`, a pure `F=2` state with the field off), so `t=0` overlaps go meaningless away from crossings | code |
 | Does it hide the diabatic hop? | **No -- it displays it.** Label `k` is the continuous deformation of initial state `k`, so a population that traverses diabatically appears to move *between labels*: it keeps its character while the continuation of its own label swaps character. That is the intended reading, and it is what makes the labels useful for plotting where population goes | code |
 | Then what is actually unsafe? | Only this: near a crossing the tracker does not resolve, the chained match pairs by character rather than by adiabatic branch, so **what the labels mean depends on `N_steps`**. `utils.py:126` states the direction -- a finer timestep resolves the crossing and makes the adiabatic label more likely to differ from where the population is. With `56` of `64` labels crossing, successive crossings resolve at different `N`, giving stable stretches broken by en-masse flips: `0, 16, 0, 16` swapped cells across `20000..320000`. So never compare tracked columns *across* step counts; within one run they are exactly what they claim to be | geometry |
-| Does the tracked label settle at fine grids? | **No, and refining does not fix it -- by design.** Swapped cells by pair: `0` (`20000/40000`), `16` (`40000/80000`), `0` (`80000/160000`), `16` (`160000/320000`). Stable stretches broken by en-masse flips, because these are shared-slow scans: one set of slow eigenvectors serves the whole batch, so one decision moves every cell holding population in that state. A finer grid resolves the crossing *better* and so makes the adiabatic label *more* likely to name the wrong state. The quantum-number answer converges throughout: `1.87e-02, 3.76e-03, 8.47e-04, 4.51e-04` | geometry |
 | Do the saved `results/` need regenerating? | **Yes, and for a worse reason than sampling.** `left` vs `mid` at `N_steps=20000` moves `depletion` by `6.5e-03`, `465x` the `1.4e-05` the report quotes. But the RC cases were also *aliased* -- see below | cross-scheme |
 | Was the RC-background data resolved at all? | **No.** `rc_offset=-7.4 MHz` against a `-2.0..+1.5` scan puts the beat at `5.4-8.9 MHz`, and `T = 1.52e-03 s` over `N=20000` gives `beat*dt = 2.6-4.3` rad -- most of a rotation per step. A frozen propagator does not approximate that, it aliases it; it needs `N ~ 6.4e+05` for `beat*dt ~ 0.1` | geometry |
-| What does Magnus buy on the real analysis? | It integrates the beat, so `beat*dt` no longer gates it. Clean second order (`2.4e-03, 3.9e-04, 9.9e-05` over `N = 20000..160000`, ratios `6.19` then `3.94`), reaching `~2.5e-05` at `N=160000` against the saved data's `~1.7e-03` | cross-scheme |
+| What does Magnus buy on the real analysis? | It integrates the beat, so `beat*dt` no longer gates it. Clean second order (`2.4e-03, 3.9e-04, 9.9e-05` over `N = 20000..160000`, ratios `6.19` then `3.94`), reaching an *extrapolated* `~2.5e-05` at `N=160000` (Richardson from the `80000/160000` pair, not measured) against the saved data's `~1.7e-03`, itself measured against a reference carrying `~1e-04` | cross-scheme + theory |
 | Is the frozen propagator the exact solution? | **No.** It exponentiates a *frozen* `H` exactly; `"magnus"` exponentiates an *integrated* `H` approximately. Both are second order and converge to the same closed form. To reach `1e-03` in population on the multitone model: `"frozen"` needs `256,000` steps, `"magnus"` `32,000`. It was called `"exact"` during the investigation and renamed before shipping, after the name caused a third misreading; see the naming note above | exact |
 | Is the Magnus propagator shipped? | **Yes**, `propagator="magnus"` on both entry points; `"frozen"` remains the default and stays bit-identical | timing + exact |
-| Is it faster on the real problem? | **Yes**, `2.10x` at batch `25` on the SPA2 shape. The synthetic `3.23x` overstated it: real `H_mu` is denser, so the `O(n^2 S)` Taylor series recovers less against the `O(n^3)` eigensolve it replaces | timing |
 | Does multitone Magnus work? | **Yes**, and it is now the *more accurate* path. It was landed refusing `magnus` because freezing the beat phase is wrong; the kernel now integrates it | exact |
 | Is the frozen beat phase actually a problem? | **Yes, severely.** In *populations* at `beat*dt = 0.17` rad the frozen propagator errs `1.4e-01` against Magnus's `1.7e-03`. Over `N = 4000..16000` its error does not fall at all (`2.2e-01, 1.2e-01, 1.4e-01`) while Magnus is clean order `2` | exact |
 | Was the first beat kernel correct? | **No**, it anchored the beat prefactor at the midpoint while the kernel integrates from the left endpoint. The effect is subtler than first reported: with one coupled pair the stray phase is a *gauge transformation* and changes no population. It is physical only once a second field is present -- then `5e-03` at `N=4000`, falling with `dt` | exact |
@@ -2254,6 +2262,12 @@ rather than active, but a fixed term count is the wrong shape for a guard.
 
 ### The Four SPA2 Regressions Remain Unexplained
 
+> **Superseded.** They are explained, and they are not a Magnus defect: see
+> the C1 rows in Verdicts and *Phase C, closed*. The comparison this
+> subsection rests on scored `N=4000` against `magnus@128000`, a cross-`N`
+> comparison of tracked-label columns, which is invalid here. At matched
+> `N_steps` the two schemes converge together in every cell.
+
 Two mechanisms were proposed and both are ruled out at the real operating point:
 
 - **Cancellation in `magnus_integral`.** Its outer-product form loses the
@@ -2349,6 +2363,12 @@ across the grid was known, and rejecting a method for degrading cells already
 quantity that does not bound the result.
 
 ### Not Yet Established
+
+> **Partly superseded.** The first bullet is done: the multitone path is
+> implemented, integrates the beat with per-component shifted kernels, and is
+> tested against a closed form (`rotating_coupling`). It is now the *more*
+> accurate multitone path, not a hazard to fence off. Read the remaining
+> bullets with that in mind.
 
 - **The multitone path is untested.** `make_magnus_loop` replaces only
   `_time_evolve_mu_batched_shared_slow`. The multitone loop carries a beat phase
