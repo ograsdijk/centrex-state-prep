@@ -1303,7 +1303,9 @@ effective error reads as `1e-03` of population and refuses to converge.
 | Why is `det=-1.0` so hard? | Not numerics. Two resonance crossings, the near one `2.5 sigma` out in the beam flank, giving *partial* Landau-Zener transfer. The observable swings `0.177` across `100 kHz` | geometry |
 | Do the four SPA2 Magnus regressions have an explanation? | **Yes, resolved: they are not a property of Magnus.** Compared at the *same* `N_steps`, where both schemes share one label path, `|frozen - magnus|` shrinks in every reported cell -- `4.69e-03 -> 6.85e-05 -> 9.85e-06` over `N = 4000, 16000, 64000` -- and tracks the control cells exactly. A systematic defect would not shrink. The original `<= 2.2e-04` differences sit below the `~5e-03` discretisation floor both schemes share at `N=4000` | cross-scheme |
 | Can a fine run of either scheme settle it? | **No, and it actively misleads.** `probabilities_final` is indexed by adiabatically tracked labels and 56 of 64 cross here, so runs at different `N_steps` track independently and the same population lands in a different column. Comparing `N=4000` against `N=128000` returns `0.999` in cells whose physics is nearly identical -- a permutation, not an error | geometry |
-| Do the saved `results/` need regenerating? | **Yes.** Between `left` (the default when they were produced) and `mid` at `N_steps=20000`, `depletion` moves `3.4e-03` and `transferred` `3.1e-03` -- `243x` and `224x` the `1.4e-05` convergence the SPA report quotes for them. Stale in substance, not just provenance | cross-scheme |
+| Do the saved `results/` need regenerating? | **Yes, and for a worse reason than sampling.** `left` vs `mid` at `N_steps=20000` moves `depletion` by `6.5e-03`, `465x` the `1.4e-05` the report quotes. But the RC cases were also *aliased* -- see below | cross-scheme |
+| Was the RC-background data resolved at all? | **No.** `rc_offset=-7.4 MHz` against a `-2.0..+1.5` scan puts the beat at `5.4-8.9 MHz`, and `T = 1.52e-03 s` over `N=20000` gives `beat*dt = 2.6-4.3` rad -- most of a rotation per step. A frozen propagator does not approximate that, it aliases it; it needs `N ~ 6.4e+05` for `beat*dt ~ 0.1` | geometry |
+| What does Magnus buy on the real analysis? | It integrates the beat, so `beat*dt` no longer gates it. Clean second order (`2.4e-03, 3.9e-04, 9.9e-05` over `N = 20000..160000`, ratios `6.19` then `3.94`), reaching `~2.5e-05` at `N=160000` against the saved data's `~1.7e-03` | cross-scheme |
 | Is the frozen propagator the exact solution? | **No.** It exponentiates a *frozen* `H` exactly; `"magnus"` exponentiates an *integrated* `H` approximately. Both are second order and converge to the same closed form. To reach `1e-03` in population on the multitone model: `"frozen"` needs `256,000` steps, `"magnus"` `32,000`. It was called `"exact"` during the investigation and renamed before shipping, after the name caused a third misreading; see the naming note above | exact |
 | Is the Magnus propagator shipped? | **Yes**, `propagator="magnus"` on both entry points; `"frozen"` remains the default and stays bit-identical | timing + exact |
 | Is it faster on the real problem? | **Yes**, `2.10x` at batch `25` on the SPA2 shape. The synthetic `3.23x` overstated it: real `H_mu` is denser, so the `O(n^2 S)` Taylor series recovers less against the `O(n^3)` eigensolve it replaces | timing |
@@ -1437,6 +1439,34 @@ so the files are stale in substance. Note what that also implies -- a convergenc
 figure obtained by refining `N_steps` under one sampling measured
 self-consistency, not accuracy, and understated the true discretisation error by
 more than two orders of magnitude.
+
+### The RC background was aliased, not merely stale
+
+Regenerating `results/` turned up something bigger than the sampling default.
+
+The RC tone is fixed while SPA2 is scanned, so the beat runs at `5.4-8.9 MHz`
+across the scan. The trajectory lasts `1.52e-03 s`, so at the `N_steps=20000` the
+analysis used, **the beat advances `2.6-4.3` radians per step**. That is not a
+coarse approximation of the beat; it is aliasing. The report's Numerical Notes
+already record that a `2500`-step run produced "a false large far-right peak" and
+that `20000` removed it -- but `20000` is still deep in the same regime, so that
+artifact was reduced rather than eliminated.
+
+Two things follow, and the second is a trap worth naming:
+
+1. **Digits in the peak table beyond the third decimal are not meaningful.** The
+   saved data sits `~1.7e-03` from a converged answer while quoting values like
+   `0.999877` to six decimals.
+2. **Among aliased results, comparisons between them are arbitrary.** Scoring
+   `left` and `mid` at `N=20000` against a reference suggested `left` -- the
+   *old* setting -- was closer, which contradicts midpoint being second order.
+   It was coincidence between two aliased runs. Establishing `beat*dt` first
+   would have shown that no ordering there could mean anything, and it is
+   cheaper than any of the runs that produced the misleading numbers.
+
+`beat*dt` is geometry: computable from the scan configuration and the trajectory
+duration, with no propagation at all. Check it before choosing `N_steps` for any
+multitone scan, the way `grading_ceiling` is checked before enabling grading.
 
 ### What a reader should take away
 
