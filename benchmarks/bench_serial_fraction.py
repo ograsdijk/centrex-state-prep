@@ -39,6 +39,7 @@ from common import (
     write_results,
 )
 from state_prep import Simulator, scan_grid
+from state_prep.simulator import LabelGapTracker, _sample_offset
 from state_prep.utils import find_max_overlap_idx, reorder_evecs
 
 SHIPPED = Simulator._time_evolve_mu_batched_shared_slow
@@ -64,8 +65,19 @@ def make_instrumented(timings: dict[str, float]):
     def impl(
         self, *, H_slow_t, muw_hams, coupling_scales, D_mu_diag_batch, t_array,
         monitor_states, store_final_probabilities, store_final_monitor_probabilities,
-        progress, eig_backend,
+        progress, eig_backend, time_sampling="mid", propagator="frozen",
     ):
+        # Refuse rather than silently ignore. This loop implements only the
+        # frozen path; accepting `magnus` here would report the frozen split
+        # under the Magnus label, and a benchmark-only copy that quietly drops
+        # what the shipped loop does is exactly how the LabelGapTracker defect
+        # got in.
+        if propagator != "frozen":
+            raise ValueError(
+                f"bench_serial_fraction instruments the frozen propagator only; "
+                f"got {propagator!r}"
+            )
+        sample_offset = _sample_offset(time_sampling)
         batch = int(D_mu_diag_batch.shape[0])
         coupling_scales = np.asarray(coupling_scales)
         H_tini = H_slow_t(t_array[0])
@@ -95,20 +107,25 @@ def make_instrumented(timings: dict[str, float]):
             return np.linalg.eigh(M)
 
         last_evecs = V_ref
+        # The shipped loop updates this every timestep, in the shared section.
+        # Leaving it out understates the very fraction this benchmark measures.
+        gap_tracker = LabelGapTracker(len(self.hamiltonian.QN))
         for i, t in enumerate(tqdm(t_array[:-1], disable=not progress)):
             dt = t_array[i + 1] - t_array[i]
+            t_sample = t + sample_offset * dt
 
             t0 = time.perf_counter()
-            H_slow_i = H_slow_t(t)
+            H_slow_i = H_slow_t(t_sample)
             t1 = time.perf_counter()
             D, V = eig(H_slow_i)
             t2 = time.perf_counter()
-            _, evecs = reorder_evecs(V, D, V_ref)
+            Es, evecs = reorder_evecs(V, D, V_ref)
             last_evecs = evecs
+            gap_tracker.update(Es, t_sample)
             t3 = time.perf_counter()
 
             Vh = V.conj().T
-            H_mu_rot = [Vh @ H_mu_t(t) @ V for H_mu_t in muw_hams]
+            H_mu_rot = [Vh @ H_mu_t(t_sample) @ V for H_mu_t in muw_hams]
             t4 = time.perf_counter()
 
             psis_slow = psis_batch @ V.conj()
