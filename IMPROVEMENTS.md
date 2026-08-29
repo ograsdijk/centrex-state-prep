@@ -1482,6 +1482,35 @@ Two things follow, and the second is a trap worth naming:
 duration, with no propagation at all. Check it before choosing `N_steps` for any
 multitone scan, the way `grading_ceiling` is checked before enabling grading.
 
+### The SPA singlet-vs-triplet example, measured
+
+`benchmarks/bench_spa_verification.py`. The example reports every chain
+transferring to `>= 0.9991` with a singlet-vs-triplet **spread** of `1.7e-04`,
+all at `N_steps = 10_000` on the shipped defaults.
+
+| question | verdict | evidence |
+| --- | --- | --- |
+| Are the readout identities stable? | **Yes.** Identical `(J, F1, F, mF)` for both stages over `N = 2500..40000` and both samplings. They sit upstream of every reported transfer, so a change would have redefined the numbers rather than looking like an error | geometry |
+| Is the reported `1.7e-04` spread resolved at `10_000`? | **Yes.** On AP2 the spread changes by `9.8e-06` from `10k` to `20k` and `1.3e-07` from `20k` to `40k` -- one to three orders below the claim. The `6.996e-04` in the notebook's own check was `manifold` at the strongest drive, a different and looser observable | exact |
+| Is AP2 converged, including the cliff? | **Yes**, and better than the report claims. Lineshape residual `3.8e-05 -> 9.2e-06 -> 3.0e-08` over `5k..40k` with a best-fit shift of `0.000 kHz`. The report's unsupported "converged to `1.4e-5`" is real but pessimistic | exact |
+| Can a graded grid pay here? | **No.** Grading ceiling `1.581x` at `p=1` and `1.391x` at `p=2` -- indistinguishable from SPA2's, against the `~5.7x` cancellation a uniform grid holds. Density dynamic range is `6.4e+04`, so this is a real test and not the flat-density trap | geometry |
+| Does grading endanger Magnus here? | **No**, and unlike SPA2 it *lowers* `max||A||` rather than raising it (`0.1535 -> 0.1364` at `N=2500`). Note `magnus_step_norms` defaults to `coupling_scale=1.0`: at this example's prefactor `16.156` the real norms are `4.02x` larger, `0.61` at `N=2500` | geometry |
+| Should Magnus be used on this cascade? | **No.** It self-converges at **order 1** on AP2 -- best-fit shift `-3.380, -1.760, -0.880 kHz` and residual `1.0e-02, 5.5e-03, 3.3e-03`, both halving per doubling -- where the frozen propagator reaches `3.0e-08`. At matched `N` it is `~1e+05` worse on AP2 and `85x` worse on AP1 | exact |
+| Why is Magnus first order here when it matched to four figures on SPA2? | **Unresolved.** The obvious explanation is refuted: Magnus-1 neglects a commutator of `O(||A||^2)`, so a `4x` coupling should cost `~16x`, but the frozen-vs-magnus gap *falls* across prefactors `1, 4, 16.156` (`4.2e-04, 3.1e-04, 2.7e-05`). Magnus-1 is only formally first order in general; whether it presents as second order depends on that commutator cancelling, and here it does not | exact |
+
+Two method notes for anyone extending this:
+
+1. **AP2 cannot be scored pointwise.** At the cliff the population drops from
+   `0.998938` to `0.000035` between adjacent scan points, and the largest
+   frozen-vs-magnus gap sits exactly there, on a local slope three orders of
+   magnitude above the rest of the scan. Use `align_lineshape`. Its refusal to
+   clip a boundary-hitting fit is what surfaced the Magnus result above -- a
+   silently clipped shift would have read as a clean alignment.
+2. **`scan_grid` returns `B = n_detunings * n_prefactors`.** Passing a
+   per-field prefactor *array* builds an outer product rather than assigning one
+   value per field, which silently ran AP2 at AP1's power for half the points.
+   Park a field by writing its column after the fact, as the notebook does.
+
 ### What a reader should take away
 
 1. **Do not reason about convergence order at production settings.** There is no
