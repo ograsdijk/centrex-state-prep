@@ -81,6 +81,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--n-steps", type=int, nargs="+", default=[20000, 40000, 80000])
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--propagator", default="frozen", choices=("frozen", "magnus"))
     parser.add_argument("--bg-fraction", type=float, default=1 / 35)
     parser.add_argument("--rc-bg-fraction", type=float, default=1 / 35)
     parser.add_argument("--rc-offset-mhz", type=float, default=0.0)
@@ -119,7 +120,8 @@ def main() -> None:
     runs = {}
     for n_steps in args.n_steps:
         start = time.perf_counter()
-        result = run_one(setup, det_b, pref_b, n_steps, True, args.workers)
+        result = run_one(setup, det_b, pref_b, n_steps, True, args.workers,
+                         propagator=args.propagator)
         indices, selected, tracked, probs = observables(result, setup, identities)
         runs[n_steps] = {
             "indices": indices,

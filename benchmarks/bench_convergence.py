@@ -104,7 +104,8 @@ def make_grid(detunings_mhz, prefactors, n_fields: int, multitone: bool):
     return det_b, pref_b, labels
 
 
-def run_one(setup, det_b, pref_b, n_steps: int, multitone: bool, workers: int):
+def run_one(setup, det_b, pref_b, n_steps: int, multitone: bool, workers: int,
+            propagator: str = "frozen", time_sampling: str = "mid"):
     from state_prep.simulator import Simulator
 
     simulator = Simulator(
@@ -125,6 +126,8 @@ def run_one(setup, det_b, pref_b, n_steps: int, multitone: bool, workers: int):
         progress=False,
         workers=workers,
         allow_multitone_same_manifold=multitone,
+        propagator=propagator,
+        time_sampling=time_sampling,
     )
 
 

@@ -54,6 +54,8 @@ def plot_polarization(
     include_rc_bg: bool,
     rc_offset_mhz: float,
     rc_bg_fraction: float | None,
+    time_sampling: str = "mid",
+    propagator: str = "frozen",
 ) -> list[dict[str, Any]]:
     no_bg = scan_case(
         region="none",
@@ -63,6 +65,8 @@ def plot_polarization(
         detunings_hz=detunings_hz,
         workers=workers,
         parallel_backend=parallel_backend,
+        time_sampling=time_sampling,
+        propagator=propagator,
     )
     right_bg = scan_case(
         region="right",
@@ -72,6 +76,8 @@ def plot_polarization(
         detunings_hz=detunings_hz,
         workers=workers,
         parallel_backend=parallel_backend,
+        time_sampling=time_sampling,
+        propagator=propagator,
     )
     cases = [no_bg, right_bg]
     right_bg_rc = None
@@ -85,6 +91,8 @@ def plot_polarization(
             detunings_hz=detunings_hz,
             workers=workers,
             parallel_backend=parallel_backend,
+            time_sampling=time_sampling,
+            propagator=propagator,
             include_rc_bg=True,
             rc_offset_mhz=rc_offset_mhz,
             rc_bg_fraction=(
@@ -102,6 +110,8 @@ def plot_polarization(
             detunings_hz=detunings_hz,
             workers=workers,
             parallel_backend=parallel_backend,
+            time_sampling=time_sampling,
+            propagator=propagator,
             include_rc_bg=True,
             rc_offset_mhz=rc_offset_mhz,
             rc_bg_fraction=rc_bg_fraction,
@@ -248,6 +258,13 @@ def main() -> None:
     parser.add_argument("--include-rc-bg", action="store_true")
     parser.add_argument("--rc-offset-mhz", type=float, default=-7.4)
     parser.add_argument("--rc-bg-fraction", type=float)
+    # Mirrors analyze_spa2_bg_feature.py; see the note there.
+    parser.add_argument("--time-sampling", default="mid", choices=("mid", "left"))
+    parser.add_argument(
+        "--propagator", default="frozen", choices=("frozen", "magnus"),
+        help="With --include-rc-bg the beat rotates within a step and 'frozen' "
+             "does not resolve it.",
+    )
     parser.add_argument(
         "--polarization",
         choices=("z", "zy", "both"),
@@ -299,6 +316,8 @@ def main() -> None:
                 n_steps=args.n_steps,
                 workers=args.workers,
                 parallel_backend=args.parallel_backend,
+        time_sampling=args.time_sampling,
+        propagator=args.propagator,
                 include_rc_bg=args.include_rc_bg,
                 rc_offset_mhz=args.rc_offset_mhz,
                 rc_bg_fraction=args.rc_bg_fraction,
@@ -323,6 +342,8 @@ def main() -> None:
             "polarization": args.polarization,
             "workers": args.workers,
             "parallel_backend": args.parallel_backend,
+            "time_sampling": args.time_sampling,
+            "propagator": args.propagator,
             "include_rc_bg": args.include_rc_bg,
             "rc_offset_mhz": args.rc_offset_mhz,
             "rc_bg_fraction": args.rc_bg_fraction,
