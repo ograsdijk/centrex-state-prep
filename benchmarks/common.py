@@ -689,3 +689,120 @@ def magnus_step_norms(muw_hams, t_array, *, coupling_scale: float = 1.0) -> np.n
         [np.linalg.norm(sum(H(float(t)) for H in muw_hams), 2) for t in probe]
     )
     return np.interp(mids, probe, norms) * steps * float(coupling_scale)
+
+
+# --- SPA singlet-vs-triplet verification observables -------------------------
+#
+# Lifted from `examples/SPA/Experimental verification/SPA - singlet vs triplet,
+# no background.ipynb` (cell 7) so that a benchmark scores exactly what the
+# report quotes, rather than a reimplementation that drifts from it.
+#
+# The notebook identifies states by their quantum numbers **at readout**, which
+# is label-path independent and therefore safe to compare across `N_steps`.
+# `scripts/make_singlet_triplet_report_figures.py` still uses a t=0 tracked
+# index, which is not; adopting this helper there is a separate change.
+
+
+def cascade_manifold_of_eigenstates(V: np.ndarray, j_of_basis: np.ndarray) -> np.ndarray:
+    """Rotational manifold each eigenvector of `V` predominantly belongs to."""
+    weight = np.abs(V) ** 2
+    js = np.unique(j_of_basis)
+    per_j = np.array([weight[j_of_basis == j].sum(axis=0) for j in js])
+    return js[per_j.argmax(axis=0)]
+
+
+def cascade_readout_identities(
+    setup: dict,
+    targets: Sequence[Any],
+    *,
+    n_steps: int = 10_000,
+    time_sampling: str = "mid",
+):
+    """`(J, F1, F, mF)` each target has become once the Stark field has ramped off.
+
+    Measured, not assumed: at `t=0` the Stark field mixes `F` badly, so a target's
+    `F` is only a good quantum number at readout. Propagating the DC fields with
+    the microwaves off answers it in one run for all targets.
+
+    This runs `Simulator.run` with `microwave_fields=None`, which dispatches to
+    `_time_evolve`. That loop propagates in `H_slow`'s own instantaneous
+    eigenbasis, where `H_slow` is diagonal, so there is no off-diagonal part for a
+    Magnus step to integrate and no `propagator` argument to pass -- `Magnus`
+    would reduce to exactly the phases already applied.
+
+    **These identities sit upstream of every reported transfer.** If they move
+    with `n_steps`, every `matched` population silently changes meaning, so
+    `bench_spa_verification.py --phase0a` asserts they do not.
+    """
+    from state_prep import Simulator
+
+    simulator = Simulator(
+        setup["trajectory"],
+        setup["electric_field"],
+        setup["magnetic_field"],
+        list(targets),
+        setup["hamiltonian"],
+        None,
+    )
+    ref = simulator.run(
+        N_steps=n_steps,
+        store_probabilities=False,
+        store_final_probabilities=True,
+        progress=False,
+        time_sampling=time_sampling,
+    )
+    table = ref.final_quantum_numbers()
+    identities = []
+    for s in range(len(targets)):
+        idx = int(np.argmax(ref.probabilities_final[s]))
+        identities.append({k: float(table[k][idx]) for k in ("J", "F1", "F", "mF")})
+    return identities
+
+
+def cascade_transfer_observables(
+    result: Any,
+    setup: dict,
+    targets: Sequence[Any],
+    j_target: int,
+    identities: Sequence[dict],
+    *,
+    tolerance: float = 0.05,
+) -> dict[str, np.ndarray]:
+    """`matched` / `tracked` / `manifold` / `spread` final populations.
+
+    `matched` is the reported number: population of the eigenstate carrying the
+    target's readout quantum numbers, identified in the basis the populations are
+    actually expressed in. `tracked` reads the same population through a `t=0`
+    index and exists only as a label-swap detector -- it is **not** safe across
+    step counts, and the notebook records the J=2 singlet moving `32 -> 29` at
+    `80_000`.
+
+    `spread` is `max - min` across the target sublevels. It is the report's actual
+    physics claim (`1.7e-04`), it is a difference of nearly equal numbers, and it
+    is the quantity whose convergence matters -- converging the individual
+    transfers does not imply it, because the errors may or may not be common-mode.
+
+    `tolerance` matches the notebook's `IDENTITY_TOL`: `F1` stays partly mixed at
+    readout (singlets at `1.4922 +- 0.0883`), while the competing level sits a
+    full `1.0` away, so `0.05` is far above the drift and far below the gap.
+    """
+    from state_prep.utils import find_max_overlap_idx, select_eigenstate
+
+    qn = setup["hamiltonian"].QN
+    j_of_basis = np.array([q.J for q in qn])
+    probs = result.probabilities_final
+    V = result.V_ini
+    table = result.final_quantum_numbers()
+    manifold = np.flatnonzero(cascade_manifold_of_eigenstates(V, j_of_basis) == j_target)
+
+    matched, tracked = [], []
+    for s, (target, identity) in enumerate(zip(targets, identities)):
+        matched.append(probs[:, s, select_eigenstate(table, identity, tolerance=tolerance)])
+        tracked.append(probs[:, s, find_max_overlap_idx(target.state_vector(qn), V)])
+    matched_arr = np.stack(matched, axis=-1)
+    return {
+        "matched": matched_arr,
+        "tracked": np.stack(tracked, axis=-1),
+        "manifold": probs[:, :, manifold].sum(axis=-1),
+        "spread": matched_arr.max(axis=-1) - matched_arr.min(axis=-1),
+    }
