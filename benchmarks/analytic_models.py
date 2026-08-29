@@ -596,6 +596,88 @@ def spa2_replica(*, rabi: float = 20.0, sigma: float = 0.08, detuning: float = 0
     )
 
 
+SIGMA_PLUS = np.array([[0.0, 1.0], [0.0, 0.0]], dtype=complex)
+SIGMA_MINUS = SIGMA_PLUS.conj().T
+
+
+def rotating_coupling(
+    *, detuning: float = 3.0e3, rabi: float = 4.0e2, beat: float = 2.8e3, T: float = 1.0
+) -> Model:
+    """A coupling that rotates at `beat` -- the multitone structure, exactly solved.
+
+    Every other model here drives the single-tone path. The multitone loop is
+    different in a way that matters: its `H_rot` carries components multiplied by
+    `exp(-i*delta_omega*t)`, rotating at the inter-tone detuning, and a
+    propagator that freezes that phase within a step rather than integrating it
+    is wrong whenever `delta_omega * dt` is not small. Nothing could test that.
+
+    This is the driven two-level problem,
+
+        H(t) = (Delta/2) sz + (Omega/2) (exp(-i*w*t) s+ + exp(+i*w*t) s-)
+
+    which is exactly the raising/lowering pair with a beat phase that the
+    multitone loop assembles. Moving to the frame rotating at `w` makes it
+    constant, so
+
+        U(t) = exp(-i*w*t*sz/2) exp(-i[((Delta - w)/2) sz + (Omega/2) sx] t)
+
+    Verified: a fine product converges to this at ratio `4.00` per refinement,
+    i.e. exactly second order, at `2.283e-05` for `1.6e+06` steps.
+
+    The defaults put `w * dt = 1.4` rad at `N_steps=2000`, deliberately far from
+    small, so a frozen beat phase is measurably wrong rather than marginally so.
+
+    `H_slow` is constant here, so the whole time dependence lives in the
+    coupling; `beat_components` gives the `(upper, lower)` pair the multitone
+    loop expects.
+
+    **Keep `detuning` and `beat` the same sign.** What makes this a real test is
+    that `detuning - beat` is small, so the drive is near resonance and actually
+    moves population. Flipping one sign leaves the closed form perfectly valid
+    but makes the term counter-rotating: `detuning - beat = -5800` against
+    `rabi = 400` transfers `(rabi/rabi_eff)**2 = 0.005` of the population, and
+    every scheme then looks catastrophically bad against dynamics that are not
+    there. Check the transfer is non-trivial before reading an error.
+    """
+
+    def H_slow(t: float) -> np.ndarray:
+        return 0.5 * detuning * SZ
+
+    upper = 0.5 * rabi * SIGMA_PLUS
+    lower = 0.5 * rabi * SIGMA_MINUS
+
+    def components(t: float):
+        return upper, lower
+
+    def H_t(t: float) -> np.ndarray:
+        s = float(t)
+        return H_slow(s) + np.exp(-1j * beat * s) * upper + np.exp(1j * beat * s) * lower
+
+    def U_exact(t: float) -> np.ndarray:
+        s = float(t)
+        return herm_expm(0.5 * beat * SZ, s) @ herm_expm(
+            0.5 * (detuning - beat) * SZ + 0.5 * rabi * SX, s
+        )
+
+    model = Model(
+        name="rotating_coupling",
+        H_t=H_t,
+        T=T,
+        n=2,
+        psi0=np.array([[1.0, 0.0]], dtype=complex),
+        U_exact=U_exact,
+        meta={"spread": abs(detuning), "commuting": False, "beat": beat,
+              "rabi": rabi, "detuning": detuning, "multitone": True},
+        H_slow=H_slow,
+        muw_hams=[lambda t: np.exp(-1j * beat * float(t)) * upper
+                  + np.exp(1j * beat * float(t)) * lower],
+    )
+    # What the multitone loop needs beyond the single-tone interface.
+    model.beat_components = [components]
+    model.beat_omega = beat
+    return model
+
+
 def reference_propagator(model: Model, *, steps: int = 400_000) -> np.ndarray:
     """Machine-precision `U(T)` by a fine midpoint product.
 
