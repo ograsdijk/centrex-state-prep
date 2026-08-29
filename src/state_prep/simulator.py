@@ -167,8 +167,25 @@ def magnus_integral(delta: np.ndarray, dt: float, shift: float = 0.0) -> np.ndar
 
 #: `"frozen"` freezes `H` at the sample point and exponentiates that frozen
 #: matrix exactly; `"magnus"` integrates `H` across the step and exponentiates by
-#: Taylor series. Both are second-order approximations of the same time-ordered
-#: exponential -- neither is the solution.
+#: Taylor series. Both approximate the same time-ordered exponential -- neither is
+#: the solution.
+#:
+#: **`"magnus"` is not uniformly better, and on some setups it is much worse.** It
+#: truncates the second Magnus term, `Omega2 = -1/2 int int [H_I(t1), H_I(t2)]`,
+#: which is its entire extra error over `"frozen"`. Where the oscillatory kernels
+#: saturate -- gaps large enough that `K(x) -> 1/(i x)` rather than growing with
+#: `dt` -- `||Omega2||` falls only *linearly* in `dt`, so refining the grid does
+#: not reduce it relative to the term retained, and the scheme is first order.
+#:
+#: Measured: on SPA2 and the analytic models it matches `"frozen"` to four
+#: significant figures. On the SPA1+SPA2 cascade it is first order and `~1e+05`
+#: worse at matched `N_steps`; it is `1.35x` faster per run and still needs `~23x`
+#: more wall clock to reach the same accuracy.
+#:
+#: `benchmarks/bench_magnus_commutator.py` computes `||Omega2||` directly for a
+#: given setup -- no propagation, no reference -- so which case you are in is
+#: answerable before spending anything. See "Performance Priority E" in
+#: `IMPROVEMENTS.md`.
 PROPAGATORS = ("frozen", "magnus")
 
 
@@ -295,15 +312,25 @@ def grading_ceiling(
 
     **A ceiling above `1` is not enough to make grading worthwhile.** A uniform
     grid's leading error telescopes to a boundary term -- interior contributions
-    cancel pairwise because every step is the same length -- which is worth
-    `14-18x` on an SPA2-like problem, and a non-uniform grid forfeits it.
-    Equidistribution genuinely reduces the summed local error, by `1.7-2.2x`, and
-    still loses that trade. Measured against closed-form solutions, grading makes
-    an SPA2-like trajectory `1.8-4.2x` *worse*.
+    cancel pairwise because every step is the same length -- and a non-uniform
+    grid forfeits most of that. Measured by
+    `benchmarks/bench_grid_cancellation.py` on an SPA2-like model: cancellation
+    is `47.5x` on a uniform grid against `8.4x` graded, a `5.69x` loss, while
+    equidistribution buys only `1.32x` of placement. Net, grading is `4.3x`
+    *worse* -- and the decomposition predicts it (`5.69/1.32 = 4.3`).
 
-    So treat roughly `14x` as the break-even, not `1x`. Grading paid `100-245x`
-    on a pulse quiet for `97%` of its window, where the ceiling is far above that
-    threshold. Between the two, measure rather than assume.
+    So the break-even is the cancellation ratio, not `1x`. Two real cases sit on
+    the wrong side of it: SPA2 (`1.58x`) and the SPA1+SPA2 cascade (`1.581x`,
+    measured `17-20x` worse than uniform). Grading paid `100-245x` on a pulse
+    quiet for `97%` of its window, where the ceiling clears the threshold easily.
+
+    **Grading harder does not help.** This ceiling is what the *optimal*
+    placement achieves, since it derives from equidistribution being optimal;
+    pushing past it lowers the placement gain while destroying more telescoping.
+    Where `1/f` is genuinely large, the construction that banks it is a
+    *piecewise-uniform* grid -- constant `dt` per block -- which keeps telescoping
+    within each block and pays a boundary term per transition rather than per
+    step. `step_density` does not build one.
     """
     if probes < 2:
         raise ValueError("probes must be >= 2")
@@ -1315,17 +1342,21 @@ class Simulator:
             - "auto": grade the grid by `||dH/dt||`, concentrating steps where
               the fields move.
 
-              **On an SPA2-like trajectory this makes accuracy worse, by
-              `1.8-4.2x`.** Measured against closed-form solutions at production
-              `delta*dt`. Equidistribution does reduce the summed local error
-              (`1.7-2.2x`), but a uniform grid's leading error telescopes to a
-              boundary term worth `14-18x`, and a non-uniform grid forfeits that.
+              **On the real trajectories measured so far this makes accuracy
+              worse**: `4.3x` on an SPA2-like model against closed-form
+              solutions, and `17-20x` on the SPA1+SPA2 cascade. Equidistribution
+              does reduce the summed local error (`1.32x`), but a uniform grid's
+              leading error telescopes to a boundary term -- cancellation `47.5x`
+              uniform against `8.4x` graded -- and a non-uniform grid forfeits
+              most of it. `benchmarks/bench_grid_cancellation.py` measures both
+              halves of that trade.
 
               It wins where a large fraction of the run is *static*: `100-245x`
               on a pulse that is quiet for `97%` of its window. The ceiling is
-              `1/f` for active fraction `f`, and it must comfortably exceed the
-              cancellation ratio -- order `14x`, not `1x` -- to pay. SPA2's
-              ceiling is `1.58x`, which is why it loses there.
+              `1/f` for active fraction `f`, and it must exceed the *cancellation
+              ratio*, not `1x`, to pay. SPA2's ceiling is `1.58x` and the
+              cascade's `1.581x`, which is why both lose. Grading more
+              aggressively cannot rescue it -- see `grading_ceiling`.
 
               Estimate the ceiling before enabling it; no propagation needed:
 
@@ -1655,6 +1686,25 @@ class Simulator:
           existed. Midpoint is free and reaches a given accuracy in about 4x
           fewer steps at `N_steps=1000` and 3.3x at 2000, converging to no
           measurable difference by 16000.
+
+        Propagator:
+        - `propagator="frozen"` (default) freezes `H` at the sample point and
+          exponentiates that frozen matrix exactly, by eigendecomposition.
+          `"magnus"` integrates `H` across the step instead and exponentiates by
+          Taylor series, replacing the per-scan-point `O(n^3)` eigensolve with
+          `O(n^2 S)` work, so it is faster and more so at larger batch.
+
+          **Faster per run is not the same as cheaper.** `"magnus"` truncates the
+          second Magnus term, and where the oscillatory kernels saturate that
+          truncation falls only linearly in `dt`, making the scheme first order.
+          On SPA2 and the analytic models it matches `"frozen"` to four
+          significant figures. On the SPA1+SPA2 cascade it is `~1e+05` worse at
+          matched `N_steps`, and `1.35x` faster per run buys `~23x` *more* wall
+          clock to reach equal accuracy.
+
+          Which case you are in is answerable without propagating anything:
+          `benchmarks/bench_magnus_commutator.py` computes the truncated term
+          directly. Do that before selecting `"magnus"` for a new setup.
         """
         # Validate here, not only in the loops, so a bad name is rejected before
         # any work is done rather than on the first timestep.
@@ -2093,10 +2143,13 @@ class Simulator:
                     # (`||A|| ~ 0.038` rad at the operating point) that a short
                     # Taylor series applied to the S state vectors converges to
                     # machine precision in `n**2 * S` work, replacing the `n**3`
-                    # eigensolve below, and is identical to the exact path to
-                    # four significant figures against closed-form solutions at
-                    # production `delta*dt`. The speedup grows with batch size;
-                    # see Priority E in IMPROVEMENTS.md for measured figures.
+                    # eigensolve below, and matches the frozen path to four
+                    # significant figures on SPA2 and the analytic models. It does
+                    # *not* match everywhere: the truncated second Magnus term can
+                    # fall only linearly in `dt`, making this first order and far
+                    # less accurate than `"frozen"` despite being faster per step.
+                    # Check `bench_magnus_commutator.py` before selecting it; see
+                    # `PROPAGATORS` above and Priority E in IMPROVEMENTS.md.
                     delta = D + D_mu_diag_batch[b]
                     A = H_rot * magnus_integral(delta, dt)
                     psis_slow[b] = apply_magnus_taylor(A, psis_slow[b]) * np.exp(
