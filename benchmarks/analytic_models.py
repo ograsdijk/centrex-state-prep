@@ -710,6 +710,51 @@ class _FakeHamiltonian:
         self.QN = list(range(n))
 
 
+def ode_residual(model: "Model", probes: int = 9, h: Optional[float] = None):
+    """How badly does `model.U_exact` fail to solve `i Udot = H U`?
+
+    Returns `(max_relative_residual, max_unitarity_error, initial_condition_ok)`.
+
+    Every error this repository measures against a closed form is only as good as
+    the closed form, and a *wrong* closed form is more dangerous than an
+    unconverged reference: it does not wobble, so nothing looks suspicious. Five
+    models here were mis-parameterised at some point in the timestep
+    investigation without any check catching it.
+
+    This gate shares no code with the propagators it protects. It differentiates
+    `U_exact` numerically and asks whether `i Udot U^H` reproduces `H(t)`, so it
+    catches a model whose solution belongs to a *different* Hamiltonian --
+    which is the failure that actually occurred.
+
+    Central differences, so the residual floor is roughly `1e-06` relative rather
+    than machine precision. That is a gate, not a measurement: a wrong model is
+    wrong by `O(1)`, not by `1e-06`. Where an analytic derivative is available
+    (see `test_rotating_coupling_closed_form_solves_the_ode`) prefer it.
+    """
+    if model.U_exact is None:
+        raise ValueError(f"{model.name} has no U_exact to check")
+
+    # `U` turns over on `1/||H||`; the step has to be far below that, and far
+    # above where cancellation in the difference quotient takes over.
+    scale = np.linalg.norm(model.H_t(0.5 * model.T), 2)
+    if h is None:
+        h = min(1e-3 / max(scale, 1e-12), model.T * 1e-4)
+
+    worst_res = 0.0
+    worst_uni = 0.0
+    for t in np.linspace(0.15 * model.T, 0.85 * model.T, probes):
+        U = model.U_exact(t)
+        dU = (model.U_exact(t + h) - model.U_exact(t - h)) / (2.0 * h)
+        residual = np.linalg.norm(1j * dU @ U.conj().T - model.H_t(t), 2)
+        local = np.linalg.norm(model.H_t(t), 2)
+        worst_res = max(worst_res, residual / max(local, 1e-12))
+        worst_uni = max(
+            worst_uni, np.linalg.norm(U.conj().T @ U - np.eye(model.n), 2)
+        )
+    ok = np.allclose(model.U_exact(0.0), np.eye(model.n), atol=1e-10)
+    return worst_res, worst_uni, bool(ok)
+
+
 def stub_simulator(model: Model):
     """A `Simulator` that runs the shipped loops on an arbitrary `H(t)`.
 

@@ -473,3 +473,53 @@ def test_spa_like_grading_raises_the_magnus_step_norm():
     assert magnus_step_norms(model.muw_hams, graded).max() > magnus_step_norms(
         model.muw_hams, uniform
     ).max()
+
+
+# --- the references themselves --------------------------------------------
+#
+# Everything else in this file measures a propagator against a closed form, so
+# the closed forms are load-bearing. A wrong one is more dangerous than an
+# unconverged reference: it does not wobble, so nothing looks suspicious, and
+# five models here were mis-parameterised at some point without a check noticing.
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [am.rotating, am.scalar, am.engineered, am.spa_like, am.rotating_coupling],
+    ids=lambda b: b.__name__,
+)
+def test_closed_form_solves_its_own_hamiltonian(builder):
+    """`i Udot U^H` must reproduce `H(t)`, independently of any propagator.
+
+    This is the check that catches a model whose solution belongs to a
+    *different* Hamiltonian -- the failure that actually happened repeatedly,
+    and which comparing propagators against each other cannot detect, since
+    they would all agree with each other and all disagree with reality.
+    """
+    model = builder()
+    residual, unitarity, initial_ok = am.ode_residual(model)
+    assert initial_ok, f"{model.name}: U_exact(0) is not the identity"
+    assert unitarity < 1e-10, f"{model.name}: U_exact is not unitary ({unitarity:.2e})"
+    # Central differences floor out around 1e-6 relative; a wrong model is
+    # wrong by O(1), so this threshold is not delicate.
+    assert residual < 1e-4, (
+        f"{model.name}: U_exact does not solve its own H(t), "
+        f"relative residual {residual:.2e}"
+    )
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [am.rosen_zener, am.allen_eberly, am.landau_zener],
+    ids=lambda b: b.__name__,
+)
+def test_two_level_models_declare_a_transfer_instead(builder):
+    """These carry an asymptotic transfer probability, not a `U_exact`.
+
+    They cannot take the ODE gate above, so record explicitly that the gap is
+    known rather than leaving them looking checked.
+    """
+    model = builder()
+    assert model.U_exact is None
+    assert model.analytic_transfer is not None
+    assert 0.0 <= model.analytic_transfer <= 1.0
