@@ -42,6 +42,7 @@ from common import (
 )
 from state_prep import Simulator, scan_grid
 from state_prep.simulator import limit_blas_threads
+from state_prep.simulator import _sample_offset
 from state_prep.utils import find_max_overlap_idx, reorder_evecs
 
 SHIPPED = Simulator._time_evolve_mu_batched_shared_slow
@@ -73,7 +74,15 @@ def make_capturing(store: dict, capture_step: int):
         progress,
         eig_backend,
         time_sampling="mid",
+        propagator="frozen",
     ):
+        # This loop implements the frozen propagator only. Refusing beats
+        # silently ignoring: reporting a frozen result under the Magnus label is
+        # how a benchmark-only copy misleads.
+        if propagator != "frozen":
+            raise ValueError(
+                f"bench_inner_loop_ceiling instruments the frozen propagator only; got {propagator!r}"
+            )
         batch = int(D_mu_diag_batch.shape[0])
         coupling_scales = np.asarray(coupling_scales)
         H_tini = H_slow_t(t_array[0])
@@ -100,13 +109,15 @@ def make_capturing(store: dict, capture_step: int):
                 return w, v
             return np.linalg.eigh(M)
 
+        sample_offset = _sample_offset(time_sampling)
         for i, t in enumerate(t_array[:-1]):
             dt = t_array[i + 1] - t_array[i]
-            H_slow_i = H_slow_t(t)
+            t_sample = t + sample_offset * dt
+            H_slow_i = H_slow_t(t_sample)
             D, V = eig(H_slow_i)
             _, evecs = reorder_evecs(V, D, V_ref)
             Vh = V.conj().T
-            H_mu_rot = [Vh @ H_mu_t(t) @ V for H_mu_t in muw_hams]
+            H_mu_rot = [Vh @ H_mu_t(t_sample) @ V for H_mu_t in muw_hams]
             psis_slow = psis_batch @ V.conj()
 
             if i == capture_step:

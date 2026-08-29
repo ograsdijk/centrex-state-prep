@@ -31,6 +31,7 @@ from common import build_spa2_setup, make_detunings  # noqa: E402
 from paired import compare_paired, format_report  # noqa: E402
 
 from state_prep.simulator import Simulator  # noqa: E402
+from state_prep.simulator import _sample_offset
 from state_prep.utils import find_max_overlap_idx, reorder_evecs  # noqa: E402
 
 SHIPPED = Simulator._time_evolve_mu_batched_shared_slow
@@ -82,8 +83,15 @@ def make_variant(n_threads: int, mode: str):
     def impl(
         self, *, H_slow_t, muw_hams, coupling_scales, D_mu_diag_batch, t_array,
         monitor_states, store_final_probabilities, store_final_monitor_probabilities,
-        progress, eig_backend,
+        progress, eig_backend, time_sampling="mid", propagator="frozen",
     ):
+        # This loop implements the frozen propagator only. Refusing beats
+        # silently ignoring: reporting a frozen result under the Magnus label is
+        # how a benchmark-only copy misleads.
+        if propagator != "frozen":
+            raise ValueError(
+                f"bench_parallel_backends instruments the frozen propagator only; got {propagator!r}"
+            )
         coupling_scales = np.asarray(coupling_scales)
         batch, n, V_ref, monitor_idx, psis_batch = _preamble(
             self, H_slow_t, t_array, D_mu_diag_batch, monitor_states
@@ -104,16 +112,18 @@ def make_variant(n_threads: int, mode: str):
         chunks = [(a, b) for a, b in zip(bounds[:-1], bounds[1:]) if b > a]
 
         last_evecs = V_ref
+        sample_offset = _sample_offset(time_sampling)
         with ThreadPoolExecutor(max_workers=n_threads) as pool:
             for i, t in enumerate(tqdm(t_array[:-1], disable=not progress)):
                 dt = t_array[i + 1] - t_array[i]
+                t_sample = t + sample_offset * dt
 
-                D, V = eig(H_slow_t(t))
+                D, V = eig(H_slow_t(t_sample))
                 _, evecs = reorder_evecs(V, D, V_ref)
                 last_evecs = evecs
 
                 Vh = V.conj().T
-                H_mu_rot = [Vh @ H_mu_t(t) @ V for H_mu_t in muw_hams]
+                H_mu_rot = [Vh @ H_mu_t(t_sample) @ V for H_mu_t in muw_hams]
                 psis_slow = psis_batch @ V.conj()
 
                 shift = D[None, :] + D_mu_diag_batch  # (B,n)
