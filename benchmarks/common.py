@@ -773,9 +773,13 @@ def cascade_transfer_observables(
     `matched` is the reported number: population of the eigenstate carrying the
     target's readout quantum numbers, identified in the basis the populations are
     actually expressed in. `tracked` reads the same population through a `t=0`
-    index and exists only as a label-swap detector -- it is **not** safe across
-    step counts, and the notebook records the J=2 singlet moving `32 -> 29` at
-    `80_000`.
+    index, i.e. the adiabatically continued label. That is a correct and useful
+    quantity within a single run -- it is what makes population moving *between*
+    labels visible, and the two agree to `0.000e+00` here at `N_steps = 10_000`.
+    What it does not support is comparison **across** step counts: near a
+    crossing the tracker does not resolve, the label's meaning shifts with `N`,
+    and the notebook records the J=2 singlet moving `32 -> 29` at `80_000`. Use
+    `matched` for anything that varies `N_steps`.
 
     `spread` is `max - min` across the target sublevels. It is the report's actual
     physics claim (`1.7e-04`), it is a difference of nearly equal numbers, and it

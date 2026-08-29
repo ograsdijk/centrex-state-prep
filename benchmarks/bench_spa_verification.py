@@ -22,7 +22,12 @@ Three things this measures that the example does not:
 
 Method notes, all learned the hard way elsewhere in this repo:
 
-- Score `matched` (quantum numbers at readout), never `tracked` (a `t=0` index).
+- Score `matched` (quantum numbers at readout) rather than `tracked`. Not because
+  `tracked` is wrong -- `reorder_evecs` is correct, and within a single run its
+  labels are exactly what they claim to be. The two agree to `0.000e+00` at
+  `N_steps = 10_000` here. But this is a *convergence* study, so it compares
+  across step counts, and that is the one thing tracked labels do not support:
+  near a crossing the tracker does not resolve, their meaning shifts with `N`.
   The notebook records the J=2 singlet moving `32 -> 29` at `80_000`.
 - Never compare populations at a fixed detuning across step counts near a steep
   feature: that measures the slope of a resonance. For the AP2 cliff use
@@ -142,6 +147,18 @@ def phase0b(setup, args) -> list[dict]:
     print("  SPA2's was 1.58x, too small to pay against the cancellation a uniform")
     print("  grid enjoys. Compare before spending compute on the graded axis.\n")
 
+    # `magnus_step_norms` defaults to `coupling_scale=1.0`, i.e. the *nominal*
+    # field powers. The example runs at prefactors 16.156 and 8.254, and coupling
+    # goes as sqrt(intensity), so the real norms are 4.02x and 2.87x the nominal
+    # ones. Reporting the nominal number understates ||A|| fourfold and would say
+    # the Taylor guard has margin when it does not.
+    scales = [np.sqrt(PREF1_OPT), np.sqrt(PREF2_OPT)][: len(muw)]
+    muw_scaled = [
+        (lambda t, field=field, c=c: c * field(t)) for field, c in zip(muw, scales)
+    ]
+    print(f"  operating prefactors  : {PREF1_OPT:.3f} / {PREF2_OPT:.3f}"
+          f"  -> coupling x{scales[0]:.2f} / x{scales[-1]:.2f}\n")
+
     for n in args.norm_steps:
         for grid in ("uniform", "graded1", "graded2"):
             if grid == "uniform":
@@ -150,11 +167,19 @@ def phase0b(setup, args) -> list[dict]:
                 t_array = build_time_grid(
                     T, n, density=density, order=1 if grid == "graded1" else 2
                 )
-            max_norm = float(np.max(magnus_step_norms(muw, t_array)))
+            nominal = float(np.max(magnus_step_norms(muw, t_array)))
+            max_norm = float(np.max(magnus_step_norms(muw_scaled, t_array)))
             flag = "  <-- Taylor guard engages near 0.5" if max_norm > 0.4 else ""
-            print(f"  N={n:<7}{grid:<9} max||A|| = {max_norm:.4f}{flag}")
+            print(f"  N={n:<7}{grid:<9} max||A|| = {max_norm:.4f}"
+                  f"  (nominal {nominal:.4f}){flag}")
             rows.append(
-                result_row("magnus_norm", n_steps=n, grid=grid, max_norm_A=max_norm)
+                result_row(
+                    "magnus_norm",
+                    n_steps=n,
+                    grid=grid,
+                    max_norm_A=max_norm,
+                    max_norm_A_nominal=nominal,
+                )
             )
     print()
     return rows
