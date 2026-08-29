@@ -45,8 +45,10 @@ import time
 import numpy as np
 
 from common import (
+    align_lineshape,
     build_spa_cascade_setup,
     cascade_readout_identities,
+    cascade_transfer_observables,
     make_payload,
     resolve_csv_path,
     result_row,
@@ -158,10 +160,195 @@ def phase0b(setup, args) -> list[dict]:
     return rows
 
 
+# Optima the notebook and the figures script both use.
+D1_OPT, PREF1_OPT = 1.350e6, 16.156
+D2_OPT, PREF2_OPT = 0.212e6, 8.254
+
+
+def _scan(setup, stage, args, *, n_steps, grid, sampling, propagator, cliff=False):
+    """One scan of `stage`, returning `(observables, seconds)`."""
+    from state_prep import Simulator, scan_grid
+
+    hamiltonian = setup["hamiltonian"]
+    trajectory = setup["trajectory"]
+    T = float(trajectory.get_T())
+    mf01, mf12 = setup["microwave_fields"]
+
+    if stage == "ap1":
+        fields = [mf01]
+        initial = setup["initial_states"]
+        targets = setup["targets_j1"]
+        j_target = 1
+        det = np.linspace(D1_OPT - 2e6, D1_OPT + 2e6, args.points)
+        det_b, pref_b = scan_grid(
+            n_fields=1, detunings_hz=det, intensity_prefactors=PREF1_OPT
+        )
+    else:
+        fields = [mf01, mf12]
+        initial = setup["initial_states"]
+        targets = setup["targets_j2"]
+        j_target = 2
+        det = (
+            np.linspace(250e3, 380e3, args.points)
+            if cliff
+            else np.linspace(D2_OPT - 1e6, D2_OPT + 0.5e6, args.points)
+        )
+        # Only field 1 varies; AP1 is parked. Passing a 2-element prefactor array
+        # here would build an outer product (`scan_grid` returns
+        # `B = n_detunings * n_prefactors`) and silently run AP2 at AP1's power
+        # for half the points. Matches the notebook's cells 22/23.
+        det_b, pref_b = scan_grid(
+            n_fields=2,
+            detunings_hz=det,
+            intensity_prefactors=PREF2_OPT,
+            detuning_fields=[1],
+            prefactor_fields=[1],
+        )
+        det_b[:, 0] = D1_OPT
+        pref_b[:, 0] = PREF1_OPT
+
+    density = None
+    if grid != "uniform":
+        muw = [f.get_H_t_func(trajectory.R_t, hamiltonian.QN) for f in fields]
+        density = field_variation_density(hamiltonian.get_H_t_func(), muw)
+
+    simulator = Simulator(
+        trajectory,
+        setup["electric_field"],
+        setup["magnetic_field"],
+        initial,
+        hamiltonian,
+        fields,
+    )
+    t0 = time.perf_counter()
+    result = simulator.run_microwave_scan(
+        detunings_hz=det_b,
+        intensity_prefactors=pref_b,
+        N_steps=n_steps,
+        store_final_probabilities=True,
+        progress=False,
+        workers=args.workers,
+        time_sampling=sampling,
+        propagator=propagator,
+        step_density=density,
+        step_density_order=1 if grid == "graded1" else 2,
+    )
+    seconds = time.perf_counter() - t0
+    identities = cascade_readout_identities(setup, targets)
+    obs = cascade_transfer_observables(result, setup, targets, j_target, identities)
+    return obs, seconds, det
+
+
+def phase2(setup, args) -> list[dict]:
+    """Sweep propagator x sampling x grid x N_steps, scored on matched and spread."""
+    print("Phase 2: convergence sweep\n")
+    print("Self-convergence triples: p = log2(|u(N)-u(2N)| / |u(2N)-u(4N)|).")
+    print("No reference is involved, so no scheme is flattered by its own refinement.\n")
+
+    rows: list[dict] = []
+    for stage in args.stages:
+        print(f"=== {stage}{' (cliff)' if args.cliff else ''} ===", flush=True)
+        for propagator in args.propagators:
+            for sampling in args.samplings:
+                for grid in args.grids:
+                    runs = {}
+                    for n in args.n_steps:
+                        obs, secs, det = _scan(
+                            setup, stage, args, n_steps=n, grid=grid,
+                            sampling=sampling, propagator=propagator,
+                            cliff=args.cliff,
+                        )
+                        runs[n] = (obs, secs, det)
+                    label = f"{propagator}/{sampling}/{grid}"
+                    print(f"  {label}", flush=True)
+                    header = f"    {'pair':<18}{'d matched':>13}{'d spread':>13}"
+                    header += (f"{'shift kHz':>11}{'residual':>12}" if args.lineshape
+                               else f"{'order':>8}")
+                    print(header + f"{'seconds':>10}")
+                    prev = None
+                    for a, b in zip(args.n_steps, args.n_steps[1:]):
+                        dm = float(
+                            np.abs(runs[a][0]["matched"] - runs[b][0]["matched"]).max()
+                        )
+                        ds = float(
+                            np.abs(runs[a][0]["spread"] - runs[b][0]["spread"]).max()
+                        )
+                        order = np.log2(prev / dm) if prev else float("nan")
+                        shift = residual = float("nan")
+                        if args.lineshape:
+                            # Pointwise differences are ill-conditioned on AP2:
+                            # at the cliff the population falls from 0.998938 to
+                            # 0.000035 between adjacent points, so a sub-kHz
+                            # effective shift reads as a 4e-03 difference and
+                            # never converges. Separate "the curve moved" from
+                            # "the curve changed shape".
+                            det_khz = runs[a][2] / 1e3
+                            shifts, residuals = [], []
+                            for k in range(runs[a][0]["matched"].shape[1]):
+                                sh, rs = align_lineshape(
+                                    runs[b][0]["matched"][:, k],
+                                    runs[a][0]["matched"][:, k],
+                                    det_khz,
+                                    max_shift_khz=args.max_shift_khz,
+                                )
+                                shifts.append(sh)
+                                residuals.append(rs)
+                            shift = max(shifts, key=abs)
+                            residual = max(residuals)
+                        tail = (f"{shift:>11.3f}{residual:>12.3e}" if args.lineshape
+                                else f"{order:>8.2f}")
+                        print(f"    {str(a)+' vs '+str(b):<18}{dm:>13.3e}{ds:>13.3e}"
+                              + tail + f"{runs[b][1]:>10.1f}", flush=True)
+                        rows.append(
+                            result_row(
+                                "converge",
+                                stage=stage,
+                                propagator=propagator,
+                                time_sampling=sampling,
+                                grid=grid,
+                                n_coarse=a,
+                                n_fine=b,
+                                d_matched=dm,
+                                d_spread=ds,
+                                order=None if np.isnan(order) else float(order),
+                                shift_khz=None if np.isnan(shift) else float(shift),
+                                residual=None if np.isnan(residual) else float(residual),
+                                seconds_fine=runs[b][1],
+                                cliff=args.cliff,
+                            )
+                        )
+                        prev = dm
+                    print()
+    return rows
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--phase0a", action="store_true")
     ap.add_argument("--phase0b", action="store_true")
+    ap.add_argument("--phase2", action="store_true")
+    ap.add_argument("--stages", nargs="+", default=["ap1", "ap2"],
+                    choices=["ap1", "ap2"])
+    ap.add_argument("--cliff", action="store_true",
+                    help="AP2 only: scan the steep +250..+380 kHz cutoff region")
+    ap.add_argument("--n-steps", type=int, nargs="+",
+                    default=[2500, 5000, 10000, 20000, 40000])
+    ap.add_argument("--propagators", nargs="+", default=["frozen", "magnus"],
+                    choices=["frozen", "magnus"])
+    ap.add_argument("--grids", nargs="+", default=["uniform", "graded1"],
+                    choices=["uniform", "graded1", "graded2"])
+    ap.add_argument("--points", type=int, default=9)
+    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument(
+        "--lineshape",
+        action="store_true",
+        help=(
+            "score by best-fit detuning shift plus residual instead of pointwise "
+            "differences. Required for AP2, whose cliff makes a pointwise "
+            "comparison measure the slope of the resonance."
+        ),
+    )
+    ap.add_argument("--max-shift-khz", type=float, default=3.0)
     ap.add_argument(
         "--identity-steps", type=int, nargs="+", default=[2500, 5000, 10000, 20000, 40000]
     )
@@ -173,8 +360,8 @@ def main() -> None:
     ap.add_argument("--csv", nargs="?", const="", default=None)
     args = ap.parse_args()
 
-    if not (args.phase0a or args.phase0b):
-        ap.error("choose at least one of --phase0a / --phase0b")
+    if not (args.phase0a or args.phase0b or args.phase2):
+        ap.error("choose at least one of --phase0a / --phase0b / --phase2")
 
     print("building cascade setup ...", flush=True)
     setup = build_spa_cascade_setup()
@@ -183,6 +370,8 @@ def main() -> None:
         rows += phase0a(setup, args)
     if args.phase0b:
         rows += phase0b(setup, args)
+    if args.phase2:
+        rows += phase2(setup, args)
 
     payload = make_payload(
         benchmark="spa_verification",
@@ -190,6 +379,13 @@ def main() -> None:
             "identity_steps": args.identity_steps,
             "samplings": args.samplings,
             "norm_steps": args.norm_steps,
+            "n_steps": args.n_steps,
+            "stages": args.stages,
+            "propagators": args.propagators,
+            "grids": args.grids,
+            "points": args.points,
+            "workers": args.workers,
+            "cliff": args.cliff,
         },
         results=rows,
         include_gpu_env=False,
