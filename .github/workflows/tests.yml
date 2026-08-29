@@ -1,0 +1,50 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch supersedes the first; do not pay for both.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    # Developed on Windows, so run there too. The suite is otherwise
+    # platform-independent, but path handling and line endings are not, and a
+    # Linux-only matrix would surface failures that are awkward to reproduce.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        # --locked fails rather than silently relocking, so a pyproject version
+        # bump that was not accompanied by `uv lock` is caught here instead of
+        # drifting. Every dependency resolves from PyPI; there are no git or
+        # path sources in the lock.
+        run: uv sync --locked --dev
+
+      - name: Run tests
+        # pytest options live in pyproject under [tool.pytest.ini_options];
+        # -q and testpaths=["tests"] come from there.
+        run: uv run pytest
+
+      - name: Show environment on failure
+        if: failure()
+        run: |
+          uv run python -c "import numpy, scipy, centrex_tlf; print('numpy', numpy.__version__); print('scipy', scipy.__version__)"
+          uv pip list

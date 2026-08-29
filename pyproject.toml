@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "centrex-state-prep"       # keep your chosen dist name
-version = "0.1.0"                 # matches your current pyproject
+version = "0.2.0"
 description = "Package for simulating coherent state preparation and evolution for centrex"
 readme = "README.md"
 requires-python = ">=3.11"
