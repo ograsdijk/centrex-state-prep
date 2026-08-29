@@ -133,6 +133,194 @@ def field_variation_density(
     return density
 
 
+MAGNUS_TAYLOR_TERMS = 8
+
+
+def magnus_integral(delta: np.ndarray, dt: float, shift: float = 0.0) -> np.ndarray:
+    """`(exp(i*(d_i - d_j + shift)*dt) - 1) / (i*(d_i - d_j + shift))`, elementwise.
+
+    The first Magnus term for a coupling in the interaction picture of a diagonal
+    `delta`. Built from an outer product of `n` exponentials rather than `n**2`
+    of them, since `exp(i*(d_i - d_j)*dt)` factorises; the shift contributes a
+    single scalar factor, so it stays `O(n**2)`.
+
+    `shift` carries a coupling that itself rotates, which is what the multitone
+    path needs. A field beating at `delta_omega` against the rotating-frame
+    carrier contributes `exp(-i*delta_omega*(t + s))` to the integrand, and the
+    `s` part merges into the oscillatory factor as
+    `exp(i*((d_i - d_j) - delta_omega)*s)`. So the raising component takes
+    `shift = -delta_omega` and the lowering component `shift = +delta_omega`,
+    with the residual `exp(-i*delta_omega*t)` left outside as a constant.
+    Freezing that phase instead -- evaluating it once at `t_sample` and treating
+    the coupling as static -- is wrong whenever `delta_omega * dt` is not small.
+
+    The small-argument branch is load-bearing: `delta` is nearly degenerate
+    within a rotational manifold, so the quotient divides by ~0 there. `expm1`
+    keeps the mid-range conditioned, where the outer-product form loses digits to
+    cancellation.
+    """
+    e = np.exp(1j * delta * dt)
+    return _magnus_integral_from_outer(
+        np.outer(e, e.conj()), delta[:, None] - delta[None, :], dt, shift
+    )
+
+
+#: `"frozen"` freezes `H` at the sample point and exponentiates that frozen
+#: matrix exactly; `"magnus"` integrates `H` across the step and exponentiates by
+#: Taylor series. Both are second-order approximations of the same time-ordered
+#: exponential -- neither is the solution.
+PROPAGATORS = ("frozen", "magnus")
+
+
+def _normalize_propagator(propagator: str) -> str:
+    """Validate a propagator name against `PROPAGATORS`."""
+    if propagator not in PROPAGATORS:
+        raise ValueError(
+            f"propagator must be one of {PROPAGATORS}; got {propagator!r}"
+        )
+    return propagator
+
+
+def _magnus_integral_from_outer(
+    outer: np.ndarray, gaps: np.ndarray, dt: float, shift: float = 0.0
+) -> np.ndarray:
+    """`magnus_integral` with `outer(e, conj(e))` and the gap matrix precomputed.
+
+    The multitone path needs three kernels per scan point -- one static, one per
+    beat sense -- and they differ only in a scalar factor and a denominator. The
+    `n**2` outer product is common to all of them, so building it once per scan
+    point rather than once per kernel is most of the cost.
+    """
+    x = gaps + float(shift)
+    xdt = x * dt
+    with np.errstate(divide="ignore", invalid="ignore"):
+        numerator = outer * np.exp(1j * float(shift) * dt) - 1.0
+        out = numerator / (1j * x)
+
+    # Three regimes, and the masks must not overlap. `mid` excludes `tiny`
+    # explicitly: the diagonal has `x == 0`, so `expm1(0)/0` is a NaN that the
+    # `tiny` branch would then overwrite -- correct by accident, and it emits a
+    # divide warning on every step.
+    tiny = np.abs(xdt) < 1e-8
+    mid = (np.abs(xdt) < 1e-4) & ~tiny
+    if mid.any():
+        out[mid] = np.expm1(1j * xdt[mid]) / (1j * x[mid])
+    if tiny.any():
+        out[tiny] = dt * (1.0 + 0.5j * xdt[tiny])
+    return out
+
+
+def apply_magnus_taylor(A: np.ndarray, psis: np.ndarray) -> np.ndarray:
+    """`psis @ expm(-i*A)^T`, by Taylor series applied to the state vectors.
+
+    `psis` is `(S, n)` in the row-vector convention used throughout, so the
+    propagator acts on the right transposed. Each term costs `n**2 * S`, never
+    `n**3` -- which is the entire point, since it replaces an `n**3` eigensolve.
+
+    Scaling and squaring is applied only when needed. At the production operating
+    point `||A||` is about `0.038` rad and `k` is `0`, so this costs nothing; a
+    fixed series diverges once `||A||` approaches `1`, and does so *silently* --
+    measured against exact solutions, a coupling-to-spread ratio of `5e-05` gives
+    `||A| ~ 1.9` and a 10x accuracy loss with no warning, and `5e-04` overflows
+    to NaN.
+
+    The bound uses the **Frobenius** norm, not the spectral norm. `||A||_2 <=
+    ||A||_F`, so it is valid, and it costs `3 us` against `182 us` at `n=64` --
+    the spectral norm is an SVD, and would consume `43%` of the `420 us`
+    eigensolve this function exists to avoid. A guard that costs what it saves is
+    not a guard.
+    """
+    norm = float(np.linalg.norm(A, "fro"))
+    k = max(0, int(np.ceil(np.log2(norm / 0.5)))) if norm > 0.5 else 0
+    B = (-1j * A / (2**k)).T
+
+    out = psis
+    for _ in range(2**k):
+        term = out
+        acc = out.copy()
+        for j in range(1, MAGNUS_TAYLOR_TERMS + 1):
+            term = (term @ B) / j
+            acc += term
+        out = acc
+    return out
+
+
+def magnus_step_norms(
+    muw_hams: List[Callable[[float], np.ndarray]],
+    t_array: np.ndarray,
+    *,
+    coupling_scale: float = 1.0,
+) -> np.ndarray:
+    """`||A|| = ||H_mu(t_mid)|| * dt` per step, which governs the Magnus series.
+
+    Needs no propagation, so it is cheap enough to assert before a run rather
+    than discover afterwards.
+
+    Worth checking whenever `step_density` is combined with `propagator="magnus"`.
+    Grading stretches steps -- up to `50x` uniform on SPA2 -- and `||A||` scales
+    with `dt`. Which way it moves is geometry: if the density peaks where the
+    beam is, grading puts short steps there and `||A||` falls; on SPA2 the
+    density peaks at the Stark ramp instead, the long steps land nearer the beam,
+    and `max ||A||` rose from `0.044` to `0.32` against a guard that engages
+    near `0.5`.
+    """
+    t_array = np.asarray(t_array, dtype=float)
+    steps = np.diff(t_array)
+    mids = 0.5 * (t_array[:-1] + t_array[1:])
+    probe = np.linspace(t_array[0], t_array[-1], min(600, max(2, mids.size)))
+    norms = np.array(
+        [np.linalg.norm(sum(H(float(t)) for H in muw_hams), 2) for t in probe]
+    )
+    return np.interp(mids, probe, norms) * steps * float(coupling_scale)
+
+
+def grading_ceiling(
+    H_slow_t: Callable[[float], np.ndarray],
+    muw_hams: Optional[List[Callable[[float], np.ndarray]]] = None,
+    *,
+    T: float,
+    order: int = 1,
+    probes: int = 400,
+) -> float:
+    """Upper bound on what `step_density` can buy: `N_uniform / N_optimal`.
+
+    Needs no propagation -- it is arithmetic on the field profile -- so it is
+    cheap enough to check before deciding whether to grade at all.
+
+    The bound equals `1/f` for a trajectory active over a fraction `f` and static
+    elsewhere (verified: `f=0.10` gives `10.02x`, `f=0.02` gives `50.60x`). Note
+    it depends on how much of the run is **active**, not on how deep the quiet
+    is: SPA2's density spans `63774x`, which sounds decisive, but its effective
+    active fraction is `63%`, so the ceiling is only `1.58x`.
+
+    **A ceiling above `1` is not enough to make grading worthwhile.** A uniform
+    grid's leading error telescopes to a boundary term -- interior contributions
+    cancel pairwise because every step is the same length -- which is worth
+    `14-18x` on an SPA2-like problem, and a non-uniform grid forfeits it.
+    Equidistribution genuinely reduces the summed local error, by `1.7-2.2x`, and
+    still loses that trade. Measured against closed-form solutions, grading makes
+    an SPA2-like trajectory `1.8-4.2x` *worse*.
+
+    So treat roughly `14x` as the break-even, not `1x`. Grading paid `100-245x`
+    on a pulse quiet for `97%` of its window, where the ceiling is far above that
+    threshold. Between the two, measure rather than assume.
+    """
+    if probes < 2:
+        raise ValueError("probes must be >= 2")
+    if order < 1:
+        raise ValueError("order must be >= 1")
+
+    ts = np.linspace(0.0, float(T), int(probes))
+    density = np.asarray(field_variation_density(H_slow_t, muw_hams)(ts), dtype=float)
+    if not np.all(np.isfinite(density)) or density.max() <= 0:
+        raise ValueError("density must be finite and not identically zero")
+
+    weighted = density ** (1.0 / (order + 1))
+    numerator = float(T) ** order * float(np.trapezoid(density, ts))
+    denominator = float(np.trapezoid(weighted, ts)) ** (order + 1)
+    return float((numerator / denominator) ** (1.0 / order))
+
+
 def build_time_grid(
     T: float,
     N_steps: int,
@@ -728,6 +916,8 @@ class MicrowaveScanResult:
     label_gaps: Optional[dict] = None
     time_grid: str = "uniform"
     time_sampling: str = "mid"
+    # Always one of `PROPAGATORS`.
+    propagator: str = "frozen"
 
     @property
     def batch_size(self) -> int:
@@ -1361,6 +1551,7 @@ class Simulator:
         step_density=None,
         step_density_order: int = 2,
         time_sampling: str = "mid",
+        propagator: str = "frozen",
     ) -> MicrowaveScanResult:
         """Run a batched microwave scan reusing the slow diagonalization.
 
@@ -1465,6 +1656,10 @@ class Simulator:
           fewer steps at `N_steps=1000` and 3.3x at 2000, converging to no
           measurable difference by 16000.
         """
+        # Validate here, not only in the loops, so a bad name is rejected before
+        # any work is done rather than on the first timestep.
+        propagator = _normalize_propagator(propagator)
+
         if N_steps < 2:
             raise ValueError("N_steps must be >= 2")
 
@@ -1551,6 +1746,7 @@ class Simulator:
                 step_density=step_density,
                 step_density_order=step_density_order,
                 time_sampling=time_sampling,
+                propagator=propagator,
             )
 
         # Build per-microwave H_mu(t) functions (shared across batch)
@@ -1629,6 +1825,7 @@ class Simulator:
                     progress=progress,
                     eig_backend=eig_backend,
                     time_sampling=time_sampling,
+                    propagator=propagator,
                 )
         else:
             with limit_blas_threads(blas_threads):
@@ -1650,6 +1847,7 @@ class Simulator:
                     progress=progress,
                     eig_backend=eig_backend,
                     time_sampling=time_sampling,
+                    propagator=propagator,
                 )
 
         return MicrowaveScanResult(
@@ -1668,6 +1866,7 @@ class Simulator:
             label_gaps=getattr(self, "_label_gaps", None),
             time_grid="uniform" if step_density is None else "graded",
             time_sampling=time_sampling,
+            propagator=propagator,
         )
 
     def _run_microwave_scan_parallel_loky(
@@ -1687,7 +1886,9 @@ class Simulator:
         step_density=None,
         step_density_order: int = 2,
         time_sampling: str = "mid",
+        propagator: str = "frozen",
     ) -> MicrowaveScanResult:
+        propagator = _normalize_propagator(propagator)
         batch = int(detunings_hz.shape[0])
         n_jobs = min(effective_n_jobs(workers), batch)
         if n_jobs <= 1:
@@ -1707,6 +1908,7 @@ class Simulator:
                 step_density=step_density,
                 step_density_order=step_density_order,
                 time_sampling=time_sampling,
+                propagator=propagator,
             )
 
         chunk_indices = np.array_split(np.arange(batch), n_jobs)
@@ -1728,6 +1930,7 @@ class Simulator:
                 step_density=step_density,
                 step_density_order=step_density_order,
                 time_sampling=time_sampling,
+                propagator=propagator,
             )
 
         results = Parallel(n_jobs=n_jobs, backend="loky")(
@@ -1766,6 +1969,7 @@ class Simulator:
             label_gaps=first.label_gaps,
             time_grid=first.time_grid,
             time_sampling=first.time_sampling,
+            propagator=first.propagator,
         )
 
     def _time_evolve_mu_batched_shared_slow(
@@ -1782,6 +1986,7 @@ class Simulator:
         progress: bool,
         eig_backend: str,
         time_sampling: str = "mid",
+        propagator: str = "frozen",
     ):
         """Batched microwave evolution with shared slow diagonalization.
 
@@ -1836,6 +2041,13 @@ class Simulator:
 
         last_evecs = V_ref
         sample_offset = _sample_offset(time_sampling)
+        # `"frozen"` freezes `H` at the sample point and exponentiates that
+        # frozen matrix exactly, by eigendecomposition. `"magnus"` integrates `H`
+        # across the step and exponentiates by Taylor series. Both are
+        # second-order approximations of the same time-ordered exponential and
+        # converge to the same answer; neither is the solution. Where `H` moves
+        # appreciably within a step, integrating beats freezing.
+        propagator = _normalize_propagator(propagator)
         gap_tracker = LabelGapTracker(len(self.hamiltonian.QN))
         for i, t in enumerate(tqdm(t_array[:-1], disable=not progress)):
             dt = t_array[i + 1] - t_array[i]
@@ -1874,6 +2086,23 @@ class Simulator:
                 H_rot = (coupling_scales[b, 0] * H_mu_rot[0]).copy()
                 for j in range(1, len(H_mu_rot)):
                     H_rot += coupling_scales[b, j] * H_mu_rot[j]
+
+                if propagator == "magnus":
+                    # Interaction picture with respect to the diagonal, which is
+                    # handled exactly as phases. The coupling is small enough
+                    # (`||A|| ~ 0.038` rad at the operating point) that a short
+                    # Taylor series applied to the S state vectors converges to
+                    # machine precision in `n**2 * S` work, replacing the `n**3`
+                    # eigensolve below, and is identical to the exact path to
+                    # four significant figures against closed-form solutions at
+                    # production `delta*dt`. The speedup grows with batch size;
+                    # see Priority E in IMPROVEMENTS.md for measured figures.
+                    delta = D + D_mu_diag_batch[b]
+                    A = H_rot * magnus_integral(delta, dt)
+                    psis_slow[b] = apply_magnus_taylor(A, psis_slow[b]) * np.exp(
+                        -1j * delta * dt
+                    )[None, :]
+                    continue
 
                 # Add detunings + slow energies to diagonal
                 H_rot.flat[diag_idx] += D
@@ -1929,8 +2158,16 @@ class Simulator:
         progress: bool,
         eig_backend: str,
         time_sampling: str = "mid",
+        propagator: str = "frozen",
     ):
         """Batched shared-slow evolution with beat phases for same-manifold tones."""
+        # `"frozen"` freezes `H` at the sample point and exponentiates that
+        # frozen matrix exactly, by eigendecomposition. `"magnus"` integrates `H`
+        # across the step and exponentiates by Taylor series. Both are
+        # second-order approximations of the same time-ordered exponential and
+        # converge to the same answer; neither is the solution. Where `H` moves
+        # appreciably within a step, integrating beats freezing.
+        propagator = _normalize_propagator(propagator)
         if D_mu_diag_batch.ndim != 2:
             raise ValueError("D_mu_diag_batch must have shape (B,n)")
         batch = int(D_mu_diag_batch.shape[0])
@@ -2007,6 +2244,10 @@ class Simulator:
                 (field_idx, np.exp(-1j * delta_omega * t_sample))
                 for field_idx, delta_omega in beat_fields
             ]
+            # The exact propagator freezes the beat at `t_sample` (midpoint
+            # sampling, second order). Magnus integrates it across the step
+            # instead, and its kernel is anchored at the left endpoint.
+            t0_step = float(t_array[i])
 
             # See the equivalent comment in _time_evolve_mu_batched_shared_slow.
             # The beat phases change the contents of H_rot but not its basis: the
@@ -2026,6 +2267,60 @@ class Simulator:
                         phase * upper_rot[field_idx]
                         + phase.conjugate() * lower_rot[field_idx]
                     )
+
+                if propagator == "magnus":
+                    # Each component needs its own oscillatory kernel. A beating
+                    # field rotates at `delta_omega` *within* the step, so its
+                    # raising part integrates against
+                    # `exp(i*((d_i - d_j) - delta_omega)*s)` and its lowering part
+                    # against `+delta_omega`. Reusing the static kernel with the
+                    # beat phase frozen at `t_sample` would be wrong whenever
+                    # `delta_omega * dt` is not small -- which is the regime this
+                    # path exists for.
+                    delta = D + D_mu_diag_batch[b]
+                    e_delta = np.exp(1j * delta * dt)
+                    outer = np.outer(e_delta, e_delta.conj())
+                    gaps = delta[:, None] - delta[None, :]
+                    A = np.zeros((n, n), dtype=np.complex128)
+                    if static_field_indices:
+                        static_kernel = _magnus_integral_from_outer(outer, gaps, dt)
+                        for field_idx in static_field_indices:
+                            A += (
+                                coupling_scales[b, field_idx]
+                                * (upper_rot[field_idx] + lower_rot[field_idx])
+                                * static_kernel
+                            )
+                    for field_idx, delta_omega_col in beat_fields:
+                        w = float(delta_omega_col[b])
+                        # Anchored at the step's *left* endpoint, not `t_sample`.
+                        # The kernel is `int_0^dt exp(i*(gap + shift)*s) ds` with
+                        # `s` measured from `t0`, and the interaction picture it
+                        # inverts is the `exp(-i*delta*dt)` applied below, also
+                        # from `t0`. Factoring `exp(-i*w*(t0 + s))` therefore
+                        # leaves `exp(-i*w*t0)`. Using the midpoint here mixes two
+                        # anchors and leaves a spurious constant `exp(-i*w*dt/2)`.
+                        #
+                        # With a *single* coupled pair that stray phase is a gauge
+                        # transformation -- `exp(-i*th)` on the raising part and
+                        # its conjugate on the lowering part is `R^H (.) R` for
+                        # diagonal `R` -- so it telescopes away and changes no
+                        # population at all. It becomes physical as soon as a
+                        # second field is present, because the static coupling
+                        # does not receive the phase and the relative phase
+                        # between them is observable. That is the production
+                        # configuration (SPA2 + backgrounds), where it shifts
+                        # populations by `5e-03` at `N_steps=4000`.
+                        beat = np.exp(-1j * w * t0_step)
+                        A += coupling_scales[b, field_idx] * (
+                            beat * upper_rot[field_idx]
+                            * _magnus_integral_from_outer(outer, gaps, dt, -w)
+                            + beat.conjugate() * lower_rot[field_idx]
+                            * _magnus_integral_from_outer(outer, gaps, dt, w)
+                        )
+                    psis_slow[b] = apply_magnus_taylor(A, psis_slow[b]) * np.exp(
+                        -1j * delta * dt
+                    )[None, :]
+                    continue
 
                 H_rot.flat[diag_idx] += D
                 H_rot.flat[diag_idx] += D_mu_diag_batch[b]

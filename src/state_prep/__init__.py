@@ -80,8 +80,13 @@ from .simulator import (
     MicrowaveScanResult,
     SimulationResult,
     Simulator,
+    apply_magnus_taylor,
     build_time_grid,
     field_variation_density,
+    grading_ceiling,
+    magnus_integral,
+    PROPAGATORS,
+    magnus_step_norms,
     limit_blas_threads,
 )
 from .trajectory import Trajectory
@@ -132,6 +137,11 @@ __all__ = [
     "limit_blas_threads",
     "build_time_grid",
     "field_variation_density",
+    "grading_ceiling",
+    "magnus_integral",
+    "apply_magnus_taylor",
+    "PROPAGATORS",
+    "magnus_step_norms",
     "scan_grid",
     "SCAN_STORAGE_DEFAULTS",
     # plotting and helpers
