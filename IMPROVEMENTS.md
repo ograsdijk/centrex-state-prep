@@ -1301,7 +1301,9 @@ effective error reads as `1e-03` of population and refuses to converge.
 | Does a graded grid break Magnus? | **No.** Identical to midpoint on every grid. But `||A|| = ||H_mu||*dt` rises with grading when the beam sits away from the density peak (`0.044 -> 0.32` on SPA2), and the Taylor guard trips near `0.5` | exact + geometry |
 | Are Strang and Lie still rejected? | **Yes, now on a measurement**: `16x` worse than midpoint at production `delta*dt`, while Magnus is more accurate *and* `3.2x` faster. Correct implementations -- they show orders `2.00` and `1.00` in the clean regime. The old norm bound called them "completely wrong"; `16x` worse is bad but not meaningless | exact |
 | Why is `det=-1.0` so hard? | Not numerics. Two resonance crossings, the near one `2.5 sigma` out in the beam flank, giving *partial* Landau-Zener transfer. The observable swings `0.177` across `100 kHz` | geometry |
-| Do the four SPA2 Magnus regressions have an explanation? | **No.** `magnus_integral` cancellation, near-degenerate spectra and the `D_mu` diagonal are all ruled out. Most likely an artefact of scoring against `magnus@128000` | exact |
+| Do the four SPA2 Magnus regressions have an explanation? | **Yes, resolved: they are not a property of Magnus.** Compared at the *same* `N_steps`, where both schemes share one label path, `|frozen - magnus|` shrinks in every reported cell -- `4.69e-03 -> 6.85e-05 -> 9.85e-06` over `N = 4000, 16000, 64000` -- and tracks the control cells exactly. A systematic defect would not shrink. The original `<= 2.2e-04` differences sit below the `~5e-03` discretisation floor both schemes share at `N=4000` | cross-scheme |
+| Can a fine run of either scheme settle it? | **No, and it actively misleads.** `probabilities_final` is indexed by adiabatically tracked labels and 56 of 64 cross here, so runs at different `N_steps` track independently and the same population lands in a different column. Comparing `N=4000` against `N=128000` returns `0.999` in cells whose physics is nearly identical -- a permutation, not an error | geometry |
+| Do the saved `results/` need regenerating? | **Yes.** Between `left` (the default when they were produced) and `mid` at `N_steps=20000`, `depletion` moves `3.4e-03` and `transferred` `3.1e-03` -- `243x` and `224x` the `1.4e-05` convergence the SPA report quotes for them. Stale in substance, not just provenance | cross-scheme |
 | Is the frozen propagator the exact solution? | **No.** It exponentiates a *frozen* `H` exactly; `"magnus"` exponentiates an *integrated* `H` approximately. Both are second order and converge to the same closed form. To reach `1e-03` in population on the multitone model: `"frozen"` needs `256,000` steps, `"magnus"` `32,000`. It was called `"exact"` during the investigation and renamed before shipping, after the name caused a third misreading; see the naming note above | exact |
 | Is the Magnus propagator shipped? | **Yes**, `propagator="magnus"` on both entry points; `"frozen"` remains the default and stays bit-identical | timing + exact |
 | Is it faster on the real problem? | **Yes**, `2.10x` at batch `25` on the SPA2 shape. The synthetic `3.23x` overstated it: real `H_mu` is denser, so the `O(n^2 S)` Taylor series recovers less against the `O(n^3)` eigensolve it replaces | timing |
@@ -1405,6 +1407,36 @@ and invisible *again* to a single-field model that could only express it as
 gauge. Sizing it physically needs a second field, and there `rotating_coupling`
 runs out -- adding a static coupling breaks the closed form, so that measurement
 is differential (old anchor vs new), not against truth.
+
+### Phase C, closed
+
+Both open questions from the propagator plan are now answered, and the method
+that answered them is the same in both cases: **stop looking for a better
+reference and find a comparison that needs none.**
+
+**C1, the four SPA2 regressions.** The plan treated this as possibly
+unanswerable, because no closed form survives a `D_mu`-carrying Hamiltonian at
+production `delta*dt`. That framing was the mistake -- it assumed the question
+needed truth. It needed only a comparison free of the bias: run both schemes at
+the *same* `N_steps`, so they share one label path and no reference is involved,
+then watch the difference as `N_steps` grows. It shrinks in every cell, tracking
+the controls, so the regressions are two unconverged runs differing below their
+shared floor.
+
+The first attempt at this did use a fine reference, and it failed loudly enough
+to be instructive: differences of `0.999` in cells whose physics barely moves.
+That is the adiabatic label tracking, not the propagator. Any comparison of
+`probabilities_final` across different `N_steps` on this setup is invalid for the
+same reason, which is a sharper statement than the existing warning about
+comparing populations at a fixed detuning.
+
+**C2, `results/` regeneration.** Answered by measuring sensitivity rather than
+regenerating: run the saved configuration under both samplings and compare. The
+observables move `243x` and `224x` the convergence the report quotes for them,
+so the files are stale in substance. Note what that also implies -- a convergence
+figure obtained by refining `N_steps` under one sampling measured
+self-consistency, not accuracy, and understated the true discretisation error by
+more than two orders of magnitude.
 
 ### What a reader should take away
 
