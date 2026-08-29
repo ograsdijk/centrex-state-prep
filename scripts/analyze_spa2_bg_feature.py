@@ -324,6 +324,8 @@ def scan_case(
     rc_bg_fraction: float | None = None,
     top_n: int = 0,
     case_label: str | None = None,
+    time_sampling: str = "mid",
+    propagator: str = "frozen",
 ) -> dict[str, Any]:
     setup = build_spa2_setup()
     setup["trajectory"].Vini[-1] = 184.0
@@ -375,6 +377,8 @@ def scan_case(
         workers=workers,
         parallel_backend=parallel_backend,
         allow_multitone_same_manifold=include_rc_bg,
+        time_sampling=time_sampling,
+        propagator=propagator,
     )
 
     qn = setup["hamiltonian"].QN
@@ -531,6 +535,26 @@ def main() -> None:
     parser.add_argument("--rc-offset-mhz", type=float, default=-7.4)
     parser.add_argument("--rc-bg-fraction", type=float)
     parser.add_argument("--top-n", type=int, default=12)
+    # Both were library defaults when the saved analyses were produced, and both
+    # have since changed or gained an option. Recording them in the output makes
+    # a later default change visible instead of silently restating the numbers:
+    # `time_sampling` moved from "left" to "mid" and moved `depletion` by far
+    # more than the convergence this analysis quotes.
+    parser.add_argument(
+        "--time-sampling",
+        default="mid",
+        choices=("mid", "left"),
+        help="Where H is sampled within a step. Pass 'left' to reproduce "
+        "analyses produced before midpoint sampling became the default.",
+    )
+    parser.add_argument(
+        "--propagator",
+        default="frozen",
+        choices=("frozen", "magnus"),
+        help="'frozen' exponentiates H frozen at the sample point; 'magnus' "
+        "integrates it across the step. With --include-rc-bg the beat phase "
+        "rotates within a step, which 'frozen' does not resolve.",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -568,21 +592,21 @@ def main() -> None:
     )
 
     scan_results = [
-        scan_case(region="none", polarization=None, bg_fraction=0.0, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, top_n=args.top_n),
-        scan_case(region="constant", polarization="z", bg_fraction=1 / 35, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, top_n=args.top_n),
-        scan_case(region="left", polarization="z", bg_fraction=1 / 35, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, top_n=args.top_n),
-        scan_case(region="right", polarization="z", bg_fraction=1 / 35, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, top_n=args.top_n),
-        scan_case(region="constant", polarization="zy", bg_fraction=1 / 30, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, top_n=args.top_n),
-        scan_case(region="left", polarization="zy", bg_fraction=1 / 30, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, top_n=args.top_n),
-        scan_case(region="right", polarization="zy", bg_fraction=1 / 30, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, top_n=args.top_n),
+        scan_case(region="none", polarization=None, bg_fraction=0.0, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, top_n=args.top_n, time_sampling=args.time_sampling, propagator=args.propagator),
+        scan_case(region="constant", polarization="z", bg_fraction=1 / 35, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, top_n=args.top_n, time_sampling=args.time_sampling, propagator=args.propagator),
+        scan_case(region="left", polarization="z", bg_fraction=1 / 35, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, top_n=args.top_n, time_sampling=args.time_sampling, propagator=args.propagator),
+        scan_case(region="right", polarization="z", bg_fraction=1 / 35, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, top_n=args.top_n, time_sampling=args.time_sampling, propagator=args.propagator),
+        scan_case(region="constant", polarization="zy", bg_fraction=1 / 30, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, top_n=args.top_n, time_sampling=args.time_sampling, propagator=args.propagator),
+        scan_case(region="left", polarization="zy", bg_fraction=1 / 30, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, top_n=args.top_n, time_sampling=args.time_sampling, propagator=args.propagator),
+        scan_case(region="right", polarization="zy", bg_fraction=1 / 30, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, top_n=args.top_n, time_sampling=args.time_sampling, propagator=args.propagator),
     ]
     if args.include_rc_bg:
         scan_results.extend(
             [
-                scan_case(region="right", polarization="z", bg_fraction=0.0, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, include_rc_bg=True, rc_offset_mhz=args.rc_offset_mhz, rc_bg_fraction=1 / 35 if args.rc_bg_fraction is None else args.rc_bg_fraction, top_n=args.top_n, case_label="z_rc_only"),
-                scan_case(region="right", polarization="z", bg_fraction=1 / 35, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, include_rc_bg=True, rc_offset_mhz=args.rc_offset_mhz, rc_bg_fraction=args.rc_bg_fraction, top_n=args.top_n),
-                scan_case(region="right", polarization="zy", bg_fraction=0.0, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, include_rc_bg=True, rc_offset_mhz=args.rc_offset_mhz, rc_bg_fraction=1 / 30 if args.rc_bg_fraction is None else args.rc_bg_fraction, top_n=args.top_n, case_label="zy_rc_only"),
-                scan_case(region="right", polarization="zy", bg_fraction=1 / 30, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, include_rc_bg=True, rc_offset_mhz=args.rc_offset_mhz, rc_bg_fraction=args.rc_bg_fraction, top_n=args.top_n),
+                scan_case(region="right", polarization="z", bg_fraction=0.0, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, include_rc_bg=True, rc_offset_mhz=args.rc_offset_mhz, rc_bg_fraction=1 / 35 if args.rc_bg_fraction is None else args.rc_bg_fraction, top_n=args.top_n, time_sampling=args.time_sampling, propagator=args.propagator, case_label="z_rc_only"),
+                scan_case(region="right", polarization="z", bg_fraction=1 / 35, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, include_rc_bg=True, rc_offset_mhz=args.rc_offset_mhz, rc_bg_fraction=args.rc_bg_fraction, top_n=args.top_n, time_sampling=args.time_sampling, propagator=args.propagator),
+                scan_case(region="right", polarization="zy", bg_fraction=0.0, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, include_rc_bg=True, rc_offset_mhz=args.rc_offset_mhz, rc_bg_fraction=1 / 30 if args.rc_bg_fraction is None else args.rc_bg_fraction, top_n=args.top_n, time_sampling=args.time_sampling, propagator=args.propagator, case_label="zy_rc_only"),
+                scan_case(region="right", polarization="zy", bg_fraction=1 / 30, n_steps=args.n_steps, detunings_hz=detunings_hz, workers=args.workers, parallel_backend=args.parallel_backend, include_rc_bg=True, rc_offset_mhz=args.rc_offset_mhz, rc_bg_fraction=args.rc_bg_fraction, top_n=args.top_n, time_sampling=args.time_sampling, propagator=args.propagator),
             ]
         )
 
@@ -599,6 +623,8 @@ def main() -> None:
             "rc_offset_mhz": args.rc_offset_mhz,
             "rc_bg_fraction": args.rc_bg_fraction,
             "top_n": args.top_n,
+            "time_sampling": args.time_sampling,
+            "propagator": args.propagator,
         },
         "base_frequency_ghz": setup["frequency"] / 1e9,
         "spa2_center_z_cm": float(setup["r0"][2] * 100),
