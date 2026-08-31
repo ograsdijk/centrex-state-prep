@@ -1298,6 +1298,8 @@ effective error reads as `1e-03` of population and refuses to converge.
 | question | verdict | evidence |
 | --- | --- | --- |
 | Is midpoint second order? | **Yes**, `2.00` measured; left-endpoint `1.00` | exact |
+| Does left-endpoint's order survive a non-commuting, real-field trajectory? | **Yes**, `1.00` measured externally (ratios `1.914, 1.973, 1.989`) at `omega*dt ~ 7.8e+02`. `mid` is at its floor there, so its order stays unmeasurable -- see *Downstream Confirmation* | exact, external |
+| Is the `left -> mid` shift negligible once `N_steps` is large? | **Not in general -- it depends on the observable.** Unmeasurable by `16000` on a 3-point scan, but `0.112` at `80000` and `0.0149` at `640000` on an interference observable, whose accumulated phase amplifies timestep error by `1e2-1e3`. A single-eigenstate control on the same trajectory gives `3.8e-07` | exact, external |
 | Why does it not look that way in production? | `delta*dt >> 1` **and** non-commuting `H`: the neglected terms are time-ordering commutators carrying powers of `delta*dt`. Commuting `H` keeps order `2` at any scale | exact |
 | Is a convergence order measurable at production settings? | **No.** `delta*dt ~ 7.65e+04`; reaching `~1` needs `N ~ 7.6e+08`. Richardson is therefore unavailable, and CF4/Filon cannot be expected to deliver formal orders either | exact + theory |
 | Does midpoint help in practice? | **Yes.** On a commuting model at production `delta*dt`, left-endpoint saturates at `4e-01` with no convergence while midpoint reaches `9.0e-03` -- `45x` | exact |
@@ -1915,7 +1917,11 @@ and reproduces pre-option results exactly.
 
 - Every result changes. Measured `max|mid - left|` of `0.112` at `N_steps=300`
   on a 3-point scan; the difference shrinks with `N_steps` and is not
-  measurable by `16000`, but it is not zero at production settings.
+  measurable by `16000` **on that observable** -- but see *Downstream
+  Confirmation* below, where a phase-sensitive observable still shows `0.112` at
+  `N_steps=80000` and `0.0149` at `640000`. The step count at which the two
+  samplings become indistinguishable is a property of the observable, not of the
+  integrator.
 - **The saved analyses in `results/` were produced with left-endpoint sampling
   and no longer correspond to what the code now produces.** They have not been
   regenerated. Anything comparing new output against them must either pass
@@ -1924,6 +1930,71 @@ and reproduces pre-option results exactly.
   `test_state_labelling.py`, whose tracked-index swap at `N_steps=160000`
   survives the change. The bitwise tests still hold because they compare two
   runs of the same settings.
+
+### Downstream Confirmation: Left-Endpoint Is First Order On A Real Trajectory
+
+External measurement, contributed 2026-08-31 from the CeNTREX-TlF
+`reports/spb_detection` transport study, which propagates TlF `X` states
+(`J = 0-3`, 64 levels) over a 550 mm beamline at 184 m/s -- a ~760 us flight at
+`N_steps = 80000`. It bears on two claims above.
+
+**What is measured here is `left`'s order and `mid`'s convergence, not `mid`'s
+order.** `mid` sits at its own noise floor at every step count tried, so no
+order can be extracted from it -- consistent with *Is a convergence order
+measurable at production settings?* above, which answers no. This trajectory has
+`omega*dt ~ 7.8e+02` at `N_steps = 80000` (rotational splitting `~13 GHz`,
+`dt = 9.5 ns`), so it sits in the same regime, two decades below SPA2's
+`7.65e+04`. What it adds is that **`left`'s first order is cleanly measurable
+there**, on a non-commuting Hamiltonian and a measured field map rather than an
+analytic one. Arriving `<P12>` of a `J=1` hyperfine superposition:
+
+| `N_steps` | `left` | `mid` | `abs(L-M)` | `left` error ratio |
+| ---: | ---: | ---: | ---: | ---: |
+| `80000` | `-0.031394547` | `0.080281911` | `1.117e-01` | -- |
+| `160000` | `0.021937715` | `0.080283428` | `5.835e-02` | `1.914` |
+| `320000` | `0.050701610` | `0.080284245` | `2.958e-02` | `1.973` |
+| `640000` | `0.065415730` | `0.080281806` | `1.487e-02` | `1.989` |
+
+`left` halves per doubling -- order `1.00`, converging on `mid`'s value, which
+is also the check that neither scheme is simply wrong. `mid` agrees with itself
+to `2.4e-06` across the whole range, so at `N_steps = 80000` it is already
+converged while `left` is wrong by `0.11`: `~5` orders of magnitude at identical
+cost per step. The `2.4e-06` is `mid`'s floor here, not its error, so this
+bounds the gain from below and says nothing about `mid`'s order. A second case at a
+different field gives `abs(L-M)` of `3.796e-03 -> 1.895e-03 -> 9.448e-04 ->
+4.716e-04`, ratios `2.00, 2.01, 2.00`.
+
+**The step count at which the samplings converge depends on the observable, not
+just on `dt`.** The `16000` figure above was measured on a 3-point microwave
+scan. On this trajectory the same difference is still `0.112` at `80000`. The
+mechanism is amplification, not a worse integrator:
+
+- The sensitive observable is an interference term across three near-degenerate
+  hyperfine branches. It carries `cos(delta_phi)` with
+  `delta_phi = integral of delta_omega dt` over the flight -- `1e2` to `1e3`
+  radians at hyperfine splittings of tens of kHz. A relative timestep error
+  `eps` enters as a phase error `~delta_phi * eps`, so the observable amplifies
+  it by three orders of magnitude.
+- A control in the same run supports the mechanism: a state that arrives in a
+  *single* eigenstate, with no interference term, gives `abs(L-M) = 3.8e-07` at
+  `N_steps = 80000` -- same trajectory, same step count, `2.9e+05` times
+  smaller. That is larger than the `1e2-1e3` amplification alone predicts, so
+  the accumulated phase is the direction of the effect rather than the whole of
+  it; the control's own error constant is smaller too. The two cases are not
+  the same observable, only the same column name.
+
+So population-type observables of a single eigenstate converge early and hide
+the difference; phase-type observables of a superposition do not. A convergence
+study run only on the former will pass while the latter is wrong by `O(0.1)`.
+
+**This sharpens the `results/` warning above rather than softening it.** A
+downstream consumer that measured the `left -> mid` shift on an
+insensitive observable and concluded "three orders below anything published"
+would be wrong for its own phase-sensitive columns. That happened: the study
+above measured `3.1e-05` on a `J=2` state, kept its `left`-generated data, and
+found later that its `J=1` columns had moved by `0.113` including a sign change.
+Recommend consumers pin `time_sampling` explicitly rather than inheriting it,
+and re-measure the shift on the most phase-sensitive observable they publish.
 
 ### The Ceiling Is `1/f`, And Uniform Grids Get A Cancellation Bonus
 
