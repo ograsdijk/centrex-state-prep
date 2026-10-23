@@ -11,7 +11,6 @@ from pathlib import Path
 import numpy as np
 
 from common import (
-    add_nvidia_dll_paths,
     make_payload,
     resolve_csv_path,
     result_row,
@@ -24,20 +23,20 @@ def hermitian(rng: np.random.Generator, n: int) -> np.ndarray:
     return (matrix + matrix.conj().T) / 2
 
 
-def cuda_event_timing(cp, fn, *, warmup: int, repeat: int) -> dict[str, float]:
+def cuda_event_timing(torch, fn, *, warmup: int, repeat: int) -> dict[str, float]:
     for _ in range(warmup):
         fn()
-    cp.cuda.Stream.null.synchronize()
+    torch.cuda.synchronize()
 
     times = []
     for _ in range(repeat):
-        start = cp.cuda.Event()
-        end = cp.cuda.Event()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
         start.record()
         fn()
         end.record()
         end.synchronize()
-        times.append(cp.cuda.get_elapsed_time(start, end) / 1000.0)
+        times.append(start.elapsed_time(end) / 1000.0)
     return {
         "time_best_s": float(min(times)),
         "time_mean_s": float(sum(times) / len(times)),
@@ -69,7 +68,6 @@ def main() -> None:
 def run_parent(args: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         worker_output = Path(tmp) / "gpu_kernel_worker.json"
-        add_nvidia_dll_paths()
         env = dict(os.environ)
         cmd = [
             sys.executable,
@@ -149,28 +147,37 @@ def worker_config(args: argparse.Namespace) -> dict[str, object]:
 def run_worker(args: argparse.Namespace) -> None:
     results = []
     try:
-        add_nvidia_dll_paths()
-        from state_prep_gpu._cupy import cupy
+        import torch
         from state_prep_gpu.slow_hamiltonian import (
             BatchedSlowHamiltonianTerms,
             slow_hamiltonian_batch,
         )
 
-        cp = cupy()
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA-enabled PyTorch is unavailable")
+        device = torch.device("cuda")
         rng = np.random.default_rng(123)
         terms_np = {
             key: hermitian(rng, args.n)
             for key in ("Hff", "HSx", "HSy", "HSz", "HZx", "HZy", "HZz")
         }
         terms = BatchedSlowHamiltonianTerms(
-            **{key: cp.asarray(value, dtype=cp.complex128) for key, value in terms_np.items()}
+            **{
+                key: torch.as_tensor(value, dtype=torch.complex128, device=device)
+                for key, value in terms_np.items()
+            }
         )
-        e_field = cp.asarray(rng.normal(size=(args.batch, 3)), dtype=cp.float64)
-        b_field = cp.asarray(rng.normal(size=(args.batch, 3)), dtype=cp.float64)
-        out = cp.empty((args.batch, args.n, args.n), dtype=cp.complex128)
+        e_field = torch.as_tensor(rng.normal(size=(args.batch, 3)), dtype=torch.float64, device=device)
+        b_field = torch.as_tensor(rng.normal(size=(args.batch, 3)), dtype=torch.float64, device=device)
+        out = torch.empty((args.batch, args.n, args.n), dtype=torch.complex128, device=device)
+
+        expected = slow_hamiltonian_batch(terms, e_field, b_field)
+        torch.testing.assert_close(
+            slow_hamiltonian_batch(terms, e_field, b_field, out=out), expected
+        )
 
         alloc_timing = cuda_event_timing(
-            cp,
+            torch,
             lambda: slow_hamiltonian_batch(terms, e_field, b_field),
             warmup=args.warmup,
             repeat=args.repeat,
@@ -185,7 +192,7 @@ def run_worker(args: argparse.Namespace) -> None:
         )
 
         out_timing = cuda_event_timing(
-            cp,
+            torch,
             lambda: slow_hamiltonian_batch(terms, e_field, b_field, out=out),
             warmup=args.warmup,
             repeat=args.repeat,

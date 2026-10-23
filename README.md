@@ -9,7 +9,7 @@ Two packages live here:
 
 - `state_prep` — the CPU simulation engine. This is the reference implementation
   and what the example notebooks use.
-- `state_prep_gpu` — an optional flat, array-based CuPy path for large batched
+- `state_prep_gpu` — an optional flat, array-based PyTorch path for large batched
   scans. See `src/state_prep_gpu/README.md`.
 
 ## Getting started
@@ -89,6 +89,12 @@ result = simulator.run_microwave_scan(
 `workers > 1` spreads the batch across processes and is worth using for
 production-sized scans; see the `run_microwave_scan` docstring for when it helps
 and when it does not.
+
+`Simulator.run()` and `run_microwave_scan()` automatically detect exact
+Hamiltonian blocks and diagonalize them independently when the detected split
+is substantial. Detection includes the active field and microwave couplings
+across the sampled trajectory, so transverse terms or differently oriented
+microwaves can merge blocks. Use `block_eigh=False` to force dense eigensolves.
 
 For a cascade using distinct microwave carriers, list fields in low-to-high
 rotational order (for example J = 0 -> 1, then J = 1 -> 2). The rotating-frame

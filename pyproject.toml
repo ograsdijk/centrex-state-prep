@@ -30,6 +30,9 @@ dependencies = [
     "dill",
 ]
 
+[project.optional-dependencies]
+gpu = ["torch>=2.0"]
+
 # setuptools configuration for src/ layout & package data
 [tool.pytest.ini_options]
 testpaths = ["tests"]

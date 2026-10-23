@@ -9,7 +9,7 @@ import numpy as np
 def _reorder_evecs_batched_np(V_in: np.ndarray, E_in: np.ndarray, V_ref: np.ndarray):
     overlap = np.abs(np.conj(np.swapaxes(V_in, -2, -1)) @ V_ref)
     best_j = np.argmax(overlap, axis=-1)
-    order = np.argsort(best_j, axis=-1)
+    order = np.argsort(best_j, axis=-1, kind="stable")
     V_out = np.take_along_axis(V_in, order[..., None, :], axis=-1)
     E_out = np.take_along_axis(E_in, order, axis=-1)
     return E_out, V_out
@@ -116,20 +116,19 @@ def _time_cpu(cfg: BenchConfig, terms_np, E_t, B_t, psi0) -> float:
     return t_best
 
 
-def _time_gpu(cfg: BenchConfig, terms_np, E_t, B_t, psi0) -> float:
-    from state_prep_gpu._cupy import cupy
-
-    cp = cupy()
+def _time_torch(cfg: BenchConfig, terms_np, E_t, B_t, psi0) -> float:
+    import torch
 
     from state_prep_gpu.slow_hamiltonian import BatchedSlowHamiltonianTerms
     from state_prep_gpu.simulator import simulate_batched
 
     terms_gpu = BatchedSlowHamiltonianTerms(
-        **{k: cp.asarray(v, dtype=cp.complex128) for k, v in terms_np.items()}
+        **{k: torch.as_tensor(v, dtype=torch.complex128, device="cuda") for k, v in terms_np.items()}
     )
 
-    E_t_gpu = cp.asarray(E_t, dtype=cp.float64)
-    B_t_gpu = cp.asarray(B_t, dtype=cp.float64)
+    E_t_gpu = torch.as_tensor(E_t, dtype=torch.float64, device="cuda")
+    B_t_gpu = torch.as_tensor(B_t, dtype=torch.float64, device="cuda")
+    psi0_gpu = torch.as_tensor(psi0, dtype=torch.complex128, device="cuda")
 
     # Warmup
     for _ in range(cfg.warmup):
@@ -137,13 +136,13 @@ def _time_gpu(cfg: BenchConfig, terms_np, E_t, B_t, psi0) -> float:
             terms=terms_gpu,
             E_t=E_t_gpu,
             B_t=B_t_gpu,
-            psi0=psi0,
+            psi0=psi0_gpu,
             dt=cfg.dt,
             H_mu_t=None,
             D_mu=None,
             return_final_probabilities=False,
         )
-        cp.cuda.Stream.null.synchronize()
+        torch.cuda.synchronize()
         _ = out.psi_final
 
     t_best = float("inf")
@@ -153,13 +152,13 @@ def _time_gpu(cfg: BenchConfig, terms_np, E_t, B_t, psi0) -> float:
             terms=terms_gpu,
             E_t=E_t_gpu,
             B_t=B_t_gpu,
-            psi0=psi0,
+            psi0=psi0_gpu,
             dt=cfg.dt,
             H_mu_t=None,
             D_mu=None,
             return_final_probabilities=False,
         )
-        cp.cuda.Stream.null.synchronize()
+        torch.cuda.synchronize()
         _ = out.psi_final
         t_best = min(t_best, time.perf_counter() - t0)
 
@@ -168,11 +167,11 @@ def _time_gpu(cfg: BenchConfig, terms_np, E_t, B_t, psi0) -> float:
 
 def main() -> None:
     try:
-        import cupy  # noqa: F401
+        import torch
 
-        have_cupy = True
+        have_torch_cuda = torch.cuda.is_available()
     except ModuleNotFoundError:
-        have_cupy = False
+        have_torch_cuda = False
 
     cfg = BenchConfig()
     terms_np, E_t, B_t, psi0 = _make_problem(cfg)
@@ -183,12 +182,12 @@ def main() -> None:
     t_cpu = _time_cpu(cfg, terms_np, E_t, B_t, psi0)
     print(f"CPU (NumPy) best: {t_cpu:.3f} s")
 
-    if not have_cupy:
-        print("CuPy not installed; skipping GPU benchmark.")
+    if not have_torch_cuda:
+        print("CUDA-enabled PyTorch not available; skipping GPU benchmark.")
         return
 
-    t_gpu = _time_gpu(cfg, terms_np, E_t, B_t, psi0)
-    print(f"GPU (CuPy) best:  {t_gpu:.3f} s")
+    t_gpu = _time_torch(cfg, terms_np, E_t, B_t, psi0)
+    print(f"GPU (PyTorch) best: {t_gpu:.3f} s")
 
     if t_gpu > 0:
         print(f"Speedup: {t_cpu / t_gpu:.2f}x")

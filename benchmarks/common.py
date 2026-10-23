@@ -25,13 +25,8 @@ def utc_now_iso() -> str:
 
 
 def add_nvidia_dll_paths() -> list[str]:
-    """Add pip-provided NVIDIA CUDA DLL directories to Windows search paths.
-
-    Delegates to the package implementation so benchmarks and the GPU import
-    path discover CUDA the same way. `prepend_path` is on here because NVRTC has
-    been observed to need PATH in addition to the DLL directories.
-    """
-    from state_prep_gpu._cupy import add_cuda_dll_directories
+    """Add pip-provided NVIDIA CUDA DLL directories for legacy comparisons."""
+    from cupy_legacy import add_cuda_dll_directories
 
     return add_cuda_dll_directories(prepend_path=True)
 
@@ -59,28 +54,25 @@ def environment_info(include_gpu: bool = True) -> dict[str, Any]:
 
     if include_gpu:
         try:
-            add_nvidia_dll_paths()
-            import cupy
+            import torch
 
-            info["cupy"] = cupy.__version__
-            count = int(cupy.cuda.runtime.getDeviceCount())
+            info["torch"] = torch.__version__
+            info["torch_cuda"] = torch.version.cuda
+            count = torch.cuda.device_count()
             info["cuda_device_count"] = count
             devices = []
             for idx in range(count):
-                props = cupy.cuda.runtime.getDeviceProperties(idx)
-                name = props.get("name", b"")
-                if isinstance(name, bytes):
-                    name = name.decode(errors="replace")
+                props = torch.cuda.get_device_properties(idx)
                 devices.append(
                     {
                         "index": idx,
-                        "name": name,
-                        "total_global_mem": int(props.get("totalGlobalMem", 0)),
+                        "name": props.name,
+                        "total_global_mem": int(props.total_memory),
                     }
                 )
             info["cuda_devices"] = devices
         except Exception as exc:
-            info["cupy_error"] = repr(exc)
+            info["torch_error"] = repr(exc)
 
     return info
 

@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 
 import numpy as np
 
-from ._cupy import cupy
-
-if TYPE_CHECKING:  # pragma: no cover
-    import cupy as cp
+from ._torch import torch as get_torch
 
 
 @dataclass(frozen=True)
@@ -19,7 +16,7 @@ class BatchedSlowHamiltonianTerms:
 
         H(E,B) = 2π (Hff + Ex HSx + Ey HSy + Ez HSz + Bx HZx + By HZy + Bz HZz)
 
-    All matrices are CuPy arrays with shape (n, n).
+    All matrices are PyTorch tensors with shape (n, n).
     """
 
     Hff: Any
@@ -39,21 +36,27 @@ def terms_from_centrex_tlf(
     H_uncoupled_x: Any,
     *,
     dtype: Any = None,
+    device: Any = None,
 ) -> BatchedSlowHamiltonianTerms:
-    """Convert a centrex_tlf `HamiltonianUncoupledX` dataclass to CuPy terms."""
+    """Convert a centrex_tlf `HamiltonianUncoupledX` dataclass to tensors.
 
-    cp = cupy()
+    By default, terms are placed on CUDA when available, otherwise on CPU.
+    """
+
+    torch = get_torch()
     if dtype is None:
-        dtype = cp.complex128
+        dtype = torch.complex128
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     return BatchedSlowHamiltonianTerms(
-        Hff=cp.asarray(H_uncoupled_x.Hff, dtype=dtype),
-        HSx=cp.asarray(H_uncoupled_x.HSx, dtype=dtype),
-        HSy=cp.asarray(H_uncoupled_x.HSy, dtype=dtype),
-        HSz=cp.asarray(H_uncoupled_x.HSz, dtype=dtype),
-        HZx=cp.asarray(H_uncoupled_x.HZx, dtype=dtype),
-        HZy=cp.asarray(H_uncoupled_x.HZy, dtype=dtype),
-        HZz=cp.asarray(H_uncoupled_x.HZz, dtype=dtype),
+        Hff=torch.as_tensor(H_uncoupled_x.Hff, dtype=dtype, device=device),
+        HSx=torch.as_tensor(H_uncoupled_x.HSx, dtype=dtype, device=device),
+        HSy=torch.as_tensor(H_uncoupled_x.HSy, dtype=dtype, device=device),
+        HSz=torch.as_tensor(H_uncoupled_x.HSz, dtype=dtype, device=device),
+        HZx=torch.as_tensor(H_uncoupled_x.HZx, dtype=dtype, device=device),
+        HZy=torch.as_tensor(H_uncoupled_x.HZy, dtype=dtype, device=device),
+        HZz=torch.as_tensor(H_uncoupled_x.HZz, dtype=dtype, device=device),
     )
 
 
@@ -64,43 +67,28 @@ def slow_hamiltonian_batch(
     *,
     out: Optional[Any] = None,
 ) -> Any:
-    """Compute a batch of slow Hamiltonians on GPU.
+    """Build slow Hamiltonians on the device holding ``terms``.
 
-    Parameters
-    ----------
-    terms:
-        Precomputed field-independent matrices (CuPy arrays).
-    E, B:
-        Arrays with shape (..., 3). Can be NumPy or CuPy.
-    out:
-        Optional preallocated CuPy array with shape (..., n, n).
-
-    Returns
-    -------
-    H:
-        CuPy array with shape (..., n, n), dtype complex.
+    ``E`` and ``B`` have shape ``(..., 3)`` and may be NumPy arrays or
+    PyTorch tensors. ``out`` may be a preallocated tensor with shape
+    ``(..., n, n)``. Fields are converted to the real precision of the terms,
+    so the result retains the terms' complex dtype.
     """
 
-    cp = cupy()
+    torch = get_torch()
+    field_dtype = terms.Hff.real.dtype
+    E_t = torch.as_tensor(E, dtype=field_dtype, device=terms.Hff.device)
+    B_t = torch.as_tensor(B, dtype=field_dtype, device=terms.Hff.device)
 
-    E_cp = cp.asarray(E)
-    B_cp = cp.asarray(B)
-
-    if E_cp.shape[-1] != 3 or B_cp.shape[-1] != 3:
+    if E_t.shape[-1] != 3 or B_t.shape[-1] != 3:
         raise ValueError("E and B must have shape (..., 3)")
 
-    # Broadcast scalars to (..., 1, 1)
-    Ex = E_cp[..., 0][..., None, None]
-    Ey = E_cp[..., 1][..., None, None]
-    Ez = E_cp[..., 2][..., None, None]
-    Bx = B_cp[..., 0][..., None, None]
-    By = B_cp[..., 1][..., None, None]
-    Bz = B_cp[..., 2][..., None, None]
-
-    two_pi = cp.asarray(2 * np.pi, dtype=terms.Hff.dtype)
+    Ex, Ey, Ez = (E_t[..., i, None, None] for i in range(3))
+    Bx, By, Bz = (B_t[..., i, None, None] for i in range(3))
+    two_pi = 2 * np.pi
 
     if out is None:
-        H = (
+        return two_pi * (
             terms.Hff
             + Ex * terms.HSx
             + Ey * terms.HSy
@@ -109,14 +97,13 @@ def slow_hamiltonian_batch(
             + By * terms.HZy
             + Bz * terms.HZz
         )
-        return two_pi * H
 
-    out[...] = terms.Hff
-    out[...] += Ex * terms.HSx
-    out[...] += Ey * terms.HSy
-    out[...] += Ez * terms.HSz
-    out[...] += Bx * terms.HZx
-    out[...] += By * terms.HZy
-    out[...] += Bz * terms.HZz
-    out[...] *= two_pi
+    out.copy_(terms.Hff)
+    out.add_(Ex * terms.HSx)
+    out.add_(Ey * terms.HSy)
+    out.add_(Ez * terms.HSz)
+    out.add_(Bx * terms.HZx)
+    out.add_(By * terms.HZy)
+    out.add_(Bz * terms.HZz)
+    out.mul_(two_pi)
     return out

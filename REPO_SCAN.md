@@ -7,7 +7,7 @@ were updated, the rest still reflect the original scan.
 
 `centrex-state-prep` is a Python package for simulating coherent molecular state preparation and time evolution for the CeNTREX TlF experiment. The package models how selected TlF quantum states evolve along a molecular beam trajectory through electric fields, magnetic fields, and optional microwave fields.
 
-The main package is `state_prep`, with a separate `state_prep_gpu` package that implements a flatter, array-based CuPy path for batched GPU scans.
+The main package is `state_prep`, with a separate `state_prep_gpu` package that implements a flatter, array-based PyTorch path for batched GPU scans.
 
 ## Main Capabilities
 
@@ -20,7 +20,7 @@ The main package is `state_prep`, with a separate `state_prep_gpu` package that 
 - Track adiabatic eigenstates by matching eigenvectors between timesteps.
 - Store full trajectories, final probabilities, monitor-state probabilities, and energies.
 - Run CPU microwave parameter scans that reuse shared slow-Hamiltonian diagonalization.
-- Run GPU batched simulations with CuPy for larger scan workloads.
+- Run GPU batched simulations with PyTorch for larger scan workloads.
 - Plot state probabilities, energies, microwave couplings, and field profiles.
 
 ## Package Layout
@@ -45,10 +45,10 @@ This is the original CPU-oriented simulation package.
 
 This is a newer GPU-oriented package. It deliberately avoids the original nested object graph and expects precomputed arrays.
 
-- `slow_hamiltonian.py`: Converts `centrex_tlf` Hamiltonian terms to CuPy arrays and evaluates batched slow Hamiltonians.
-- `simulator.py`: CuPy batched evolution functions, including dense microwave input, scalar-envelope microwave scans, compact microwave construction, and shared-slow-Hamiltonian scans.
+- `slow_hamiltonian.py`: Converts `centrex_tlf` Hamiltonian terms to PyTorch tensors and evaluates batched slow Hamiltonians.
+- `simulator.py`: PyTorch batched evolution functions, including dense microwave input, scalar-envelope microwave scans, compact microwave construction, and shared-slow-Hamiltonian scans.
 - `_reorder.py`: Batched eigenvector reordering on GPU.
-- `_cupy.py`: Lazy CuPy import and Windows CUDA DLL directory setup.
+- `_torch.py`: Lazy PyTorch import; GPU execution requires PyTorch but package import does not.
 - `example_smoke.py`: Minimal GPU smoke test.
 - `example_compare_cpu.py`: CPU/GPU numerical comparison for slow-Hamiltonian evolution.
 - `benchmark_compare.py`: Synthetic CPU/GPU benchmark.
@@ -95,7 +95,8 @@ Key dependencies:
 - `astropy`
 - `ipykernel`
 
-GPU support is optional and depends on a compatible CuPy package such as `cupy-cuda12x`.
+GPU support is optional and depends on an appropriate PyTorch build for the system's CUDA setup.
+The optional `gpu` project extra declares the PyTorch runtime dependency.
 
 `pyproject.toml` is the single source of packaging metadata, under the
 distribution name `centrex-state-prep`. The legacy `setup.py` and the conda
@@ -115,7 +116,7 @@ packages against a project requiring 3.11+.
 - `src/state_prep/simulator.py`: `limit_blas_threads` and the `blas_threads`
   argument; multitone same-manifold scans; process-parallel scans over loky;
   accessors on `MicrowaveScanResult`.
-- `tests/`: 20 tests plus a GPU suite skipped without CuPy.
+- `tests/`: CPU suite plus optional PyTorch tensor-backend checks.
 - `benchmarks/`: `paired.py` (before/after runner with repeats and verdicts)
   plus `bench_convergence.py`, `bench_eig_backends.py`,
   `bench_parallel_backends.py`, `bench_serial_fraction.py`,
@@ -132,7 +133,7 @@ time of the original scan the worktree had uncommitted changes in:
 - `examples/SPA/Experimental verification/SPA2 for paper.ipynb`
 - `src/state_prep/utils.py`
 - `src/state_prep_gpu/README.md`
-- `src/state_prep_gpu/_cupy.py`
+- `src/state_prep_gpu/_torch.py`
 - `src/state_prep_gpu/simulator.py`
 
 It also had untracked GPU benchmark/example files and CSV result files. This scan did not modify those files.

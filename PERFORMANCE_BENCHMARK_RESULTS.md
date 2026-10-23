@@ -1,7 +1,8 @@
 # Performance Benchmark Results
 
-> **Numbers below are single-shot. Read `IMPROVEMENTS.md` for the re-measured
-> figures.**
+> **Historical results in the sections below are single-shot.** The repeated
+> SPA2 comparison recorded later in this document is newer; read
+> `IMPROVEMENTS.md` for other re-measured figures.
 >
 > These were recorded before the paired benchmark runner existed, so none carry
 > a spread and several cannot be distinguished from no change at all. The
@@ -35,6 +36,87 @@ GPU benchmark note: CuPy could see the GPU, but NVRTC initially failed to load `
 | CPU output storage: full vs downsampled every 20 | downsampled 1.17x faster, 20x less stored output |
 | CPU microwave scan: shared-slow vs repeated runs | shared-slow 1.90x faster |
 | GPU `slow_hamiltonian_batch(out=...)` microbenchmark | inconclusive; timed out repeatedly |
+| Real SPA2, GPU vs 10-worker CPU (`N_steps=1000`, `B=250`) | baseline GPU 10.5x slower; refactored GPU 5.4x slower |
+| Real SPA2, direct cuSOLVER Jacobi at `tol=1e-12` vs CuPy `eigh` (`N_steps=1000`, `B=250`) | custom GPU path 1.056x faster; close final-state agreement |
+
+## Repeated SPA2 GPU Batch Scaling and 10-Worker CPU Comparison (2026-10-19)
+
+This is a newer repeated benchmark than the historical single-shot results
+below. It uses the real SPA2 setup (`n=64`), all four configured initial
+states, a combined detuning × power scan, midpoint sampling, and final-only
+output. The machine has an NVIDIA GeForce RTX 5070 Ti (16 GiB). CuPy 14.2.0,
+NumPy 2.4.6, and SciPy 1.17.1 were used. The CPU scan used 10 `loky` workers
+with one BLAS thread per worker. CPU and GPU measurements were interleaved,
+with one warmup and five timed rounds.
+
+The GPU-only batch sweep at 120 steps showed increasing throughput as the
+batch grew. This was a GPU scaling check, not a comparison against a 10-worker
+CPU:
+
+| Scan points | GPU mean ± std | Throughput |
+|---:|---:|---:|
+| 25 | 1.594 ± 0.075 s | 15.7 points/s |
+| 50 | 2.303 ± 0.097 s | 21.7 points/s |
+| 100 | 3.784 ± 0.096 s | 26.4 points/s |
+| 250 | 8.029 ± 0.267 s | 31.1 points/s |
+
+At 1,000 steps, the completed pre-refactor paired case (`B=250`) strongly
+favored the 10-worker CPU. The pre-refactor `B=500` case was stopped after
+three of five rounds at the user's request; treat it as partial. The `B=1000`
+case was not run.
+
+| Round | CPU, 10 workers | GPU |
+|---:|---:|---:|
+| 1 | 12.6975 s | 116.6586 s |
+| 2 | 11.8295 s | 148.5422 s |
+| 3 | 11.9480 s | 142.8621 s |
+| 4 | 12.2058 s | 84.9796 s |
+| 5 | 12.2654 s | 148.0287 s |
+| **Mean ± std** | **12.189 ± 0.326 s** | **128.214 ± 27.492 s** |
+
+Pre-refactor partial `B=500` paired rounds (3 of 5):
+
+| Round | CPU, 10 workers | GPU |
+|---:|---:|---:|
+| 1 | 21.5205 s | 255.1203 s |
+| 2 | 25.6293 s | 129.0415 s |
+| 3 | 22.2056 s | 132.9559 s |
+| **Partial mean ± sample std** | **23.118 ± 2.201 s** | **172.373 ± 71.690 s** |
+
+This partial `B=500` mean has only three rounds and a wide GPU spread, so it is
+directional rather than a completed benchmark result. The `B=250` result is
+the complete five-round comparison.
+
+Before the refactor, the GPU mean was about **10.5× slower** than the 10-worker
+CPU at this production-like step count and batch. At 120 steps GPU
+points/second increased with batch size, but that did not offset the measured
+1,000-step CPU advantage.
+
+### GPU shared-basis refactor
+
+The shared-slow GPU loop was changed to mirror the CPU's exact basis
+factorization. Per timestep, it now rotates each microwave field into the
+shared slow eigenbasis once, combines the rotated fields across scan points,
+and propagates states in that basis before rotating them back once. This avoids
+two per-point dense basis-change multiplies and avoids constructing a separate
+`A = V @ V_rot` matrix for each scan point.
+
+The same `N_steps=1000`, `B=250`, four-state setup was rerun with five
+interleaved rounds and one warmup:
+
+| Path | Mean ± std | Relative to 10-worker CPU |
+|---|---:|---:|
+| CPU, 10 workers | `11.698 ± 0.425 s` | baseline |
+| GPU, before refactor | `128.214 ± 27.492 s` | `10.52x` slower* |
+| GPU, after refactor | `62.687 ± 0.763 s` | `5.36x` slower |
+
+*The earlier CPU mean was `12.189 s`; the before/after rows came from separate
+benchmark sessions, so the ratio is approximate. The GPU refactor reduced its
+mean runtime by about **2.05x**. Maximum tracked-probability difference from the
+CPU was `1.618e-07`; maximum state infidelity was `6.66e-15`.
+
+The 10-worker CPU remains faster for this case. The benchmark runner accepts
+`--cpu-workers` and interleaves CPU/GPU rounds when both are enabled.
 
 ## Benchmark 1: Synthetic Batched Slow-Hamiltonian CPU vs GPU
 
@@ -188,6 +270,459 @@ Example commands:
 .\.venv\Scripts\python.exe benchmarks\bench_microwave_scan.py --n-steps 500 --batch 5 --compare-naive --output results\microwave.json --csv
 .\.venv\Scripts\python.exe benchmarks\bench_gpu_spa2.py --n-steps 1000 --batch-sweep 5 25 --cpu --gpu --output results\gpu_spa2.json --csv
 .\.venv\Scripts\python.exe benchmarks\bench_gpu_kernels.py --batch 32 --n 32 --output results\gpu_kernels.json --csv
+$env:CUPY_CACHE_DIR = Join-Path $env:TEMP 'centrex-state-prep-cupy-cache'
+.\.venv\Scripts\python.exe benchmarks\profile_gpu_spa2.py --n-steps 120 --batch 250 --output results\gpu_profile.json --csv
+.\.venv\Scripts\python.exe benchmarks\bench_gpu_eig_solvers.py --batch 250 --n 64 --output results\gpu_eig.json --csv
+.\.venv\Scripts\python.exe benchmarks\bench_gpu_precision.py --n-steps 120 --batch 250 --output results\gpu_precision.json --csv
+# Historical command: this real-scan CuPy runner is now retired.
+.\.venv\Scripts\python.exe benchmarks\bench_gpu_jacobi_tolerance.py --n-steps 120 --batch 250 --tolerances 1e-12 --output results\gpu_tol.json --csv
 ```
 
-Smoke-test commands run successfully for storage, CPU microwave scan, and CPU-only SPA2. The GPU kernel benchmark now runs CUDA work in a child process with `--gpu-timeout`; on this machine the smoke command exited cleanly with a skipped result because the worker timed out while initializing/running CuPy kernels.
+The real-scan Jacobi tolerance runner is retired because PyTorch does not expose
+those solver controls. Use `bench_gpu_spa2.py` for current CPU/PyTorch scans, or
+`bench_gpu_eig_tolerance.py` for the standalone legacy CuPy solver experiment.
+
+Smoke-test commands run successfully for storage, CPU microwave scan, and CPU-only SPA2. The GPU kernel benchmark now runs CUDA work in a child process with `--gpu-timeout`; an earlier smoke run timed out while initializing CuPy kernels. The cache permission issue behind that timeout is diagnosed in the GPU Eigensolver Follow-up below.
+
+## GPU Eigensolver Follow-up (2026-10-19)
+
+The CuPy stalls above were caused by the kernel-cache location used in this
+restricted run. `CUPY_CACHE_DIR` was unset, so CuPy tried to JIT-compile into
+`%USERPROFILE%\\.cupy\\kernel_cache`; the active sandbox token could read that
+directory but could not write to it. Host-to-device copies worked, while a
+basic elementwise kernel and `eigh` stalled. Pointing `CUPY_CACHE_DIR` at a
+fresh writable temp directory fixed both immediately. Reproduce GPU benchmarks
+in this environment with:
+
+```powershell
+$env:CUPY_CACHE_DIR = Join-Path $env:TEMP 'centrex-state-prep-cupy-cache'
+```
+
+### Stage profile
+
+Profiled the real SPA2 setup with `N_steps=120`, `B=250`, `n=64`, four initial
+states, final-only output, and `complex128`. CUDA events sampled every 25th
+propagation step; totals below are estimates from five sampled steps.
+
+| Stage | Estimated total | Share of profiled stages |
+| --- | ---: | ---: |
+| Shared slow-H `eigh` | 0.408 s | 5% |
+| Slow eigenvector tracking | 0.539 s | 7% |
+| Microwave rotation and assembly | 0.117 s | 1% |
+| Batched rotating-frame `eigh` | 6.704 s | 84% |
+| State update | 0.173 s | 2% |
+
+The batched rotating-frame eigensolve is the dominant GPU stage.
+
+### Eigensolver choices
+
+For 250 random Hermitian `64x64` complex128 matrices, with one warmup and five
+repeats:
+
+| Method | Mean ± std |
+| --- | ---: |
+| CuPy batched `eigh` (batched Jacobi) | 0.2029 ± 0.0032 s |
+| Direct `cusolverDnZheevjBatched` at its default tolerance | 0.2004 ± 0.0043 s |
+| 250 separate 2D CuPy `eigh` calls | 0.7815 ± 0.0094 s |
+
+The 2D solver path is about 3.9x slower on this batch. CuPy's public `syevj`
+wrapper does not expose tolerance or sweep settings, but the installed low-level
+cuSOLVER bindings do. A benchmark-only adapter tested those controls. For the
+same random matrix batch, loosening tolerance from `1e-7` to `1e-4` reduced the
+eigensolve time from 0.1596 s to 0.1394 s, while the worst residual increased
+from `3.5e-6` to `3.7e-3`. This matrix-only result did not predict propagation
+accuracy; the real scan is the deciding check.
+
+### Real-scan precision and tolerance checks
+
+At 120 steps and 250 scan points, five interleaved GPU runs compared each
+candidate with the native complex128 path:
+
+| Candidate | Candidate time | Speedup | Max probability difference | Max state infidelity | Result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| complex64 | 7.480 ± 0.231 s | 0.989x | `3.747e-1` | `9.987e-1` | Reject |
+| Jacobi `tol=1e-5` | 4.996 s | 1.488x | `9.373e-1` | `9.991e-1` | Reject |
+| Jacobi `tol=1e-7` | 5.780 s | 1.279x | `5.065e-1` | `6.344e-1` | Reject |
+| Jacobi `tol=1e-12` | 7.113 s | 1.059x | `4.056e-6` | `9.510e-11` | Promising |
+
+The complex128 native time for the precision comparison was `7.395 ± 0.185 s`.
+Looser Jacobi tolerances and complex64 are both fast or similar in a short scan,
+but their state errors are too large for this trajectory.
+
+The conservative `tol=1e-12` setting was then checked at production scan size:
+`N_steps=1000`, `B=250`, four initial states, midpoint sampling, final-only
+output, five interleaved rounds. The baseline and candidate timings were
+`62.390 ± 0.783 s` and `59.105 ± 0.605 s`; every round favored the candidate.
+The paired time change was `-3.285 ± 1.090 s` (candidate minus baseline), for a
+`1.056x` speedup. Final max probability difference was `3.347e-6`, with max
+state infidelity `3.276e-11`. This is within the repository's
+`CROSS_BACKEND_TOL=1e-5`, though the probabilities differ more than in the
+short scan.
+
+The benchmark-only direct cuSOLVER path is therefore a small, measured GPU
+improvement with close final-state agreement. It is not yet wired into the
+public simulator API. Even with this improvement, the earlier 10-worker CPU
+run remains roughly five times faster for this 250-point scan.
+
+### PyTorch batched `eigh` experiment
+
+The PyTorch 2.12 CUDA backend was tested on the same RTX 5070 Ti. For the
+isolated solver check, both frameworks received the same batch of 250 random
+Hermitian `64x64` complex128 matrices. Timings include a device synchronization
+around each call; one warmup and five interleaved repeats were used.
+
+| Method | Mean ± std | Max eigenvalue difference vs CuPy | Residual |
+| --- | ---: | ---: | ---: |
+| CuPy `eigh` | 0.1957 ± 0.0013 s | 0 | `3.38e-12` |
+| CuPy direct cuSOLVER Jacobi | 0.1948 ± 0.0006 s | 0 | `3.38e-12` |
+| PyTorch 2.12.1 `torch.linalg.eigh` | 0.0141 ± 0.0007 s | `1.06e-12` | `1.35e-13` |
+
+For the real SPA2 propagation check, only `eigh` ran through PyTorch. CuPy still
+performed Hamiltonian construction, basis tracking, microwave assembly, state
+updates, and probability calculations. DLPack passed the matrices and results
+between the libraries without host copies. The run used `N_steps=1000`,
+`B=250`, `n=64`, four initial states, midpoint sampling, final-only output,
+one warmup, and five interleaved repeats:
+
+| Path | Mean ± std | Paired speedup | Max probability difference | Max state infidelity |
+| --- | ---: | ---: | ---: | ---: |
+| CuPy for all operations | 63.846 ± 0.709 s | baseline | — | — |
+| PyTorch `eigh` + CuPy for other operations | 20.199 ± 0.180 s | 3.161x | `4.079e-8` | `1.11e-14` |
+
+The paired time change was `-43.647 ± 0.330 s` (PyTorch candidate minus CuPy
+baseline), with a 95% interval of `[-44.562, -42.732] s`; all five rounds
+favored the hybrid. It reduced runtime by 68.4% and closely matched final
+states. This is substantially better than the prior GPU path, though the
+10-worker CPU result for the same case was about 11.7 s, so the hybrid GPU is
+still slower than that CPU configuration.
+
+The benchmark implementation is an experiment, not a production backend. See
+`benchmarks/bench_gpu_torch_eigh.py` and `benchmarks/bench_gpu_torch_spa2.py`.
+For reproducibility, use a CUDA-enabled PyTorch 2.12 build and set a writable
+CuPy cache directory before running on Windows:
+
+```powershell
+$env:CUPY_CACHE_DIR = Join-Path $env:TEMP 'centrex-state-prep-cupy-cache'
+.\.venv\Scripts\python.exe benchmarks\bench_gpu_torch_eigh.py --batch 250 --n 64 --warmup 1 --repeat 5 --output $env:TEMP\torch_eigh.json
+.\.venv\Scripts\python.exe benchmarks\bench_gpu_torch_spa2.py --n-steps 1000 --batch 250 --scan-mode detuning --initial-states 4 --warmup 1 --repeat 5 --output $env:TEMP\torch_spa2.json
+.\.venv\Scripts\python.exe benchmarks\bench_gpu_torch_ops.py --batch 250 --dimension 64 --initial-states 4 --warmup 2 --repeat 7 --iterations 20 --output $env:TEMP\torch_ops.json
+```
+
+### Other GPU operations in PyTorch
+
+To estimate the headroom beyond `eigh`, the remaining repeatedly used GPU
+kernels were compared at the production shapes (`n=64`, scan batch 250, four
+states). Each sample repeated an operation 20 times; the seven rounds were
+interleaved. This was a kernel-level check with representative inputs, not a
+complete all-PyTorch propagation run. Maximum output differences were zero for
+these test inputs.
+
+| Operation | CuPy mean | PyTorch mean | PyTorch speedup | Paired result |
+| --- | ---: | ---: | ---: | --- |
+| Slow-H assembly | 0.133 ms | 0.117 ms | 1.138x | Unproven; 95% interval crosses zero |
+| Slow eigenvector reordering (`B=1`) | 0.262 ms | 0.116 ms | 2.262x | Improvement |
+| Microwave rotation and assembly | 0.431 ms | 0.359 ms | 1.202x | Improvement |
+| State update | 0.947 ms | 0.600 ms | 1.577x | Improvement |
+
+These kernels are much smaller than the eigensolve in the profile, but the
+state update and eigenvector reordering are worth moving with the solver. A full
+PyTorch propagation benchmark was then run to test the combined effect.
+
+### Full PyTorch propagation
+
+The benchmark-only implementation in `benchmarks/torch_simulator.py` keeps all
+evolution tensors in PyTorch for the whole loop: slow-H assembly, Hermitian
+diagonalization, eigenvector tracking, microwave rotation and assembly, state
+updates, and final probabilities. CuPy is used only by the comparison harness
+to run its own baseline and inspect the PyTorch result through DLPack after the
+propagation. Inputs are transferred to the GPU once before timing.
+
+At `N_steps=1000`, `B=250`, `n=64`, four initial states, midpoint sampling,
+final-only output, one warmup, and five interleaved rounds:
+
+| Path | Mean ± std | Paired speedup | Max probability difference | Max state infidelity |
+| --- | ---: | ---: | ---: | ---: |
+| CuPy throughout | 64.244 ± 0.611 s | baseline | — | — |
+| PyTorch throughout | 17.625 ± 0.330 s | 3.645x | `4.079e-8` | `1.11e-14` |
+
+The paired time change was `-46.620 ± 0.250 s` (PyTorch minus CuPy), with a
+95% interval of `[-47.313, -45.926] s`; all rounds favored PyTorch. This full
+PyTorch result also beat the PyTorch-eigh/CuPy-rest hybrid in a separate
+interleaved five-round comparison:
+
+| Path | Mean ± std | Paired speedup |
+| --- | ---: | ---: |
+| PyTorch `eigh` + CuPy rest | 20.495 ± 0.327 s | baseline |
+| PyTorch throughout | 17.645 ± 0.196 s | 1.161x |
+
+The paired change was `-2.849 ± 0.143 s`, with a 95% interval of
+`[-3.245, -2.453] s`; every round favored the full PyTorch path. Final
+probabilities agreed exactly in this run, and max state infidelity was
+`6.66e-16`. Against the earlier 10-worker CPU result of about 11.7 s, however,
+the full PyTorch GPU path is still about 1.5x slower.
+
+These measurements came from the benchmark prototype. The production
+`state_prep_gpu` API now uses PyTorch for the full propagation and declares it
+through the optional `gpu` extra; importing the package still works without
+PyTorch. The benchmark now compares the PyTorch path with the CPU scan path.
+The historical CuPy and hybrid measurements above remain recorded results.
+Run the current comparison with:
+
+```powershell
+.\.venv\Scripts\python.exe benchmarks\bench_gpu_torch_full_spa2.py --n-steps 1000 --batch 250 --scan-mode detuning --initial-states 4 --warmup 1 --repeat 5 --output $env:TEMP\torch_full_spa2.json
+```
+
+### Production PyTorch backend check (2026-10-23)
+
+The migrated `state_prep_gpu` shared-slow implementation was measured against
+the 10-worker CPU scan on the same RTX 5070 Ti, using one warmup and five paired
+rounds at `N_steps=1000`, `B=250`, `n=64`, and four initial states:
+
+| Path | Mean ± std | GPU speedup vs CPU | Max probability difference | Max state infidelity |
+| --- | ---: | ---: | ---: | ---: |
+| CPU scan, 10 workers | 13.046 ± 1.637 s | baseline | — | — |
+| Production PyTorch GPU | 18.419 ± 0.423 s | 0.708x | `1.618e-7` | `9.99e-16` |
+
+The migrated GPU path is about 1.41x slower than the CPU scan for this case,
+while the final-state agreement remains close. Reproduce with:
+
+```powershell
+.\.venv\Scripts\python.exe benchmarks\bench_gpu_spa2.py --n-steps 1000 --batch 250 --scan-modes detuning --initial-state-sweep 4 --store-every 0 --repeat 5 --warmup 1 --cpu-workers 10 --output $env:TEMP\production_torch_spa2.json
+```
+
+### GPU time-axis batching for the full PyTorch propagation
+
+The rotating-frame Hamiltonians for different time steps are known before
+propagating the states. Their eigensystems can therefore be computed in a
+small time chunk as one larger independent matrix batch, then applied to the
+states sequentially in time. This increases eigensolver batch size while
+preserving propagation order. The benchmark-only option is
+`time_chunk_size` in `benchmarks/torch_simulator.py`.
+
+At `N_steps=1000`, `B=250`, `n=64`, four initial states, midpoint sampling,
+final-only output, one warmup, and five interleaved rounds, the measured GPU
+times were:
+
+| Time chunk | Mean ± std | Speedup vs one-step chunks | Max final-probability difference |
+| ---: | ---: | ---: | ---: |
+| 1 | 17.105 ± 0.476 s | baseline | — |
+| 8 | 13.100 ± 0.348 s | 1.289x | `2.843e-9` |
+| 16 | 12.953 ± 0.247 s | 1.304x | `2.843e-9` |
+
+The paired changes were `-3.792 ± 0.069 s` for chunk 8 and `-3.938 ± 0.087 s`
+for chunk 16; both 95% intervals excluded zero. Chunk 16 was not proven faster
+than chunk 8, so chunk 8 is the smaller-memory choice. At batch 250, the GPU
+chunk-8 mean is close to, but still above, the earlier 10-worker CPU mean of
+`11.652 ± 0.289 s`.
+
+Chunk size has a memory-dependent limit. At batch 250, chunk 32 took about
+18.14 s in a three-round screen, so it was rejected. At batch 1,000, chunk 16
+exceeded the 16 GiB GPU memory limit during eigensolver workspace allocation.
+Chunk 4 fit, but its first paired round was slower than the CPU, so that run was
+stopped without treating the single round as a completed comparison. The best
+chunk size must be tuned for scan batch and available memory.
+
+Screening at `N_steps=250`, `B=250` found the same trend: chunks 4 and 8 were
+1.266x and 1.284x faster than chunk 1 over three rounds, with final
+probabilities within `5.0e-9`. Reproduce the full GPU-only comparison with:
+
+```powershell
+$env:CUPY_CACHE_DIR = Join-Path $env:TEMP 'centrex-state-prep-cupy-cache'
+.\.venv\Scripts\python.exe benchmarks\bench_gpu_torch_time_batch.py --n-steps 1000 --batch 250 --scan-mode detuning --initial-states 4 --chunks 1 8 16 --warmup 1 --repeat 5 --output $env:TEMP\torch_time_batch.json
+```
+
+### Tiling time and scan axes for larger GPU batches
+
+To fit a larger time chunk without allocating rotating-frame eigensolver
+workspace for every scan point at once, the full PyTorch path was extended to
+tile scan points inside each time chunk. At `N_steps=1000`, `B=1000`, four
+initial states, and final-only output, a dense time-chunk-1 reference was
+compared with time chunk 16 and scan tiles of 250. Both paths used all 1,000
+detunings. The tiled candidate completed without out-of-memory errors:
+
+| PyTorch CUDA path | Mean ± std | Speedup | Max final-probability difference |
+| --- | ---: | ---: | ---: |
+| Time chunk 1, full scan batch | 54.487 ± 0.042 s | baseline | — |
+| Time chunk 16, scan tile 250 | 50.600 ± 0.021 s | 1.077x | `5.53e-9` |
+
+Five interleaved repeats gave a paired runtime change of `-3.886 ± 0.015 s`
+(standard error), with a 95% interval of `[-3.928, -3.845] s`. This is a
+repeatable but modest 7.1% improvement. A short all-64-initial-states check
+(`N_steps=16`, `B=4`, scan tile 2, time chunk 4) also passed, with maximum final
+probability difference `3.45e-8`; production-size all-state performance has
+not been measured. This dense method does not depend on block structure. Re-run
+the 1,000-point comparison with:
+
+```powershell
+.\.venv\Scripts\python.exe benchmarks\bench_gpu_torch_tiled_batch.py --n-steps 1000 --batch 1000 --initial-states 4 --time-chunks 16 --scan-tiles 250 --repeat 5 --warmup 1 --output $env:TEMP\torch_tiled_batch_1000.json
+```
+
+### CUDA Graph capture for the full PyTorch trajectory (unsupported)
+
+Tested CUDA Graph capture on the full PyTorch trajectory with `N_steps=16`,
+batch 4, four initial states, and time chunks of 4. A standalone matrix multiply
+captured and replayed successfully, but trajectory capture failed at its first
+`torch.linalg.eigh` with CUDA's `operation not permitted when stream is
+capturing` error. Since the eigensolver runs at every timestep, a full-trajectory
+CUDA Graph comparison could not be timed; no speedup is established. The
+diagnostic runner is `benchmarks/bench_gpu_torch_cudagraph.py`.
+
+### Exact Hamiltonian blocks and matrix-exponential propagation
+
+For the real SPA2 trajectory, the electric and magnetic field time series were
+checked at 101 points; only their z components are nonzero. The union of
+nonzero couplings in the active slow-Hamiltonian terms (`Hff`, `HSz`, `HZz`)
+and both microwave matrices separates the 64 uncoupled basis states into exact
+connected components of sizes `14, 12, 12, 8, 8, 4, 4, 1, 1`. The same
+components were found with an exact-zero threshold and relative thresholds up
+to `1e-12`. Including all transverse Hamiltonian terms instead connects all 64
+states, so the block structure depends on the actual z-only trajectory.
+
+The sum of the block-size cubes is 7,354, compared with 262,144 for one dense
+64-state solve. That is a theoretical eigensolver-work ratio of about 35.6x;
+it is not a measured propagation speedup. An implementation must keep each
+block's eigenvectors associated with the right detuning shifts while combining
+the block results into the full adiabatic basis. This exact block path is the
+next GPU implementation target.
+
+The alternative `torch.linalg.matrix_exp` propagator was compared with the
+full-spectrum `eigh` path on the same GPU. It propagated both the configured
+four initial states and a complete 64-vector orthonormal basis:
+
+| Case | Steps | Eigh mean ± std | Matrix-exp mean ± std | Matrix-exp relative time | Max probability difference |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Four configured states, batch 250 | 250 | 4.259 ± 0.072 s | 6.834 ± 0.093 s | 1.605x slower | `1.264e-7` |
+| All 64 basis states, batch 250 | 120 | 2.313 ± 0.010 s | 3.532 ± 0.017 s | 1.527x slower | `1.919e-7` |
+
+Both comparisons used one warmup and three interleaved rounds; final
+probabilities agreed within `1e-5`. The full matrix exponential is slower even
+when all 64 input basis states are propagated, so this candidate is rejected
+for this 64-state SPA2 setup. Reproduce with:
+
+```powershell
+$env:CUPY_CACHE_DIR = Join-Path $env:TEMP 'centrex-state-prep-cupy-cache'
+.\.venv\Scripts\python.exe benchmarks\bench_gpu_torch_matrix_exp.py --n-steps 250 --batch 250 --scan-mode detuning --initial-states 4 --repeat 3 --warmup 1 --output $env:TEMP\torch_matrix_exp.json
+.\.venv\Scripts\python.exe benchmarks\bench_gpu_torch_matrix_exp.py --n-steps 120 --batch 250 --scan-mode detuning --all-states --repeat 3 --warmup 1 --output $env:TEMP\torch_matrix_exp_allstates.json
+```
+
+### Full PyTorch batch-size sweep against the 10-worker CPU path
+
+To check whether larger scans amortize GPU overhead, the full-PyTorch SPA2
+propagator was compared with the CPU scan path at batches of 250, 500, and
+1,000 detunings. Each case used four initial states, `N_steps=1000`, midpoint
+sampling, final-only storage, one warmup, and five interleaved repeats. The CPU
+used ten workers. Accuracy remained consistent across all three batches: the
+maximum final-probability difference was below `1.62e-7`, and maximum state
+infidelity below `1.6e-15`.
+
+| Batch | CPU mean ± std | Full PyTorch GPU mean ± std | GPU/CPU time | GPU peak allocated | CPU points/s | GPU points/s |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 250 | 11.652 ± 0.289 s | 17.620 ± 0.303 s | 1.512x | 0.56 GiB | 21.46 | 14.19 |
+| 500 | 22.226 ± 0.411 s | 30.932 ± 0.411 s | 1.392x | 1.08 GiB | 22.50 | 16.16 |
+| 1,000 | 43.159 ± 0.862 s | 56.950 ± 0.348 s | 1.320x | 2.13 GiB | 23.17 | 17.56 |
+
+The relative GPU gap narrows with batch size, but the GPU remains slower through
+1,000 scan points. Throughput increases with batch size on both backends; in
+this range the GPU throughput is still lower. The measured peak is PyTorch's
+allocated tensor memory (not total device memory). Reproduce with:
+
+```powershell
+$env:CUPY_CACHE_DIR = Join-Path $env:TEMP 'centrex-state-prep-cupy-cache'
+.\.venv\Scripts\python.exe benchmarks\bench_gpu_torch_batch_sweep.py --n-steps 1000 --batches 250 500 1000 --scan-mode detuning --initial-states 4 --cpu-workers 10 --warmup 1 --repeat 5 --output $env:TEMP\torch_batch_sweep.json
+```
+
+### Dense versus exact blockwise SPA2 eigensolves on CPU and GPU
+
+To measure the exact block structure directly, I assembled a batch of 250 real
+SPA2 rotating-frame 64x64 Hermitian matrices at a representative trajectory
+time. The active z-only slow terms and both microwave couplings split these
+matrices into blocks of `[12, 14, 12, 8, 8, 4, 4, 1, 1]`; the measured maximum
+off-block entry was exactly zero. Dense and blockwise paths both computed
+eigenvalues and eigenvectors (`eigh`), with the blockwise results sorted back
+into the full spectrum. One warmup and five paired, interleaved repeats were
+used; the CPU path used NumPy and the GPU path PyTorch 2.12.1 on the RTX 5070 Ti.
+
+| Device | Dense `eigh` mean ± std | Blockwise `eigh` mean ± std | Speedup | Max relative eigenvalue difference |
+| --- | ---: | ---: | ---: | ---: |
+| CPU | 0.0680 ± 0.0020 s | 0.01085 ± 0.00017 s | 6.27x | `1.33e-10` |
+| GPU | 0.01099 ± 0.00052 s | 0.00411 ± 0.00025 s | 2.68x | `9.58e-11` |
+
+The paired 95% intervals for runtime change (blockwise minus dense) were
+`[-0.0597, -0.0546] s` on CPU and `[-0.00750, -0.00628] s` on GPU. This
+establishes a solver-level win on both devices for the exact SPA2 structure. It
+does not establish the end-to-end propagation gain: finding and tracking the
+blocks, assembling each block's microwave matrices, and combining eigenvectors
+would add work at every step. The structure is tied to z-only fields; transverse
+field terms connect the sectors and remove this block advantage. Reproduce with:
+
+```powershell
+.\.venv\Scripts\python.exe benchmarks\bench_gpu_block_eigh.py --batch 250 --n-steps 1000 --warmup 1 --repeat 5 --output $env:TEMP\gpu_block_eigh.json --csv
+```
+
+### Automatic exact blocks in the CPU scan path
+
+After adding automatic support detection to `Simulator.run()` and
+`run_microwave_scan()`, the full CPU scan path was compared with block detection
+forced off. This SPA2 batch used 25 detunings, four initial states, `N_steps=500`,
+final-only output, the production `zheevd` backend, and one scan worker. The
+detector checked the slow and both microwave Hamiltonians at every midpoint and
+the initial time, finding exact blocks `[12, 14, 12, 8, 8, 4, 4, 1, 1]`. The
+timings include that detection pass. One warmup and five paired, interleaved
+repeats gave:
+
+| CPU path | Mean ± std | Speedup | Maximum final-probability difference |
+| --- | ---: | ---: | ---: |
+| Dense | 3.778 ± 0.079 s | baseline | — |
+| Automatic blocks | 2.217 ± 0.060 s | 1.704x | `2.43e-9` |
+
+The paired runtime change was `-1.561 ± 0.024 s`, with a 95% interval of
+`[-1.628, -1.493] s`; all five rounds favored blocks. This is an end-to-end
+batch scan speedup for this SPA2 configuration, not a general guarantee: a
+transverse field or off-axis microwave may merge enough sectors that the
+detector falls back to a dense solve. Both public paths accept
+`block_eigh=False` to force the dense reference. Reproduce with:
+
+```powershell
+.\.venv\Scripts\python.exe benchmarks\bench_cpu_block_eigh.py --path scan --n-steps 500 --batch 25 --workers 1 --warmup 1 --repeat 5 --output $env:TEMP\cpu_block_eigh_scan.json
+```
+
+### Full PyTorch GPU trajectory with cached blockwise eigensolves (rejected)
+
+The blockwise solver was also tried inside the full PyTorch SPA2 trajectory,
+using 250 detunings, four initial states, 1,000 steps, one warmup, and three
+paired repeats on the RTX 5070 Ti. The dense path averaged `17.224 ± 0.044 s`;
+the blockwise candidate averaged `11.213 ± 0.139 s` (1.536x faster). GPU
+utilization sampled between 54% and 95% during this PyTorch run.
+
+Do not use this speedup: the cached rotating-frame partition did not remain
+exact over the trajectory. Its maximum relative off-block entry reached
+`4.57e-7`, and the maximum final-probability difference from dense propagation
+was `0.946` (maximum state-vector difference `1.31`). The apparent speedup is
+therefore numerically invalid. The partition must account for all couplings
+and their changing locations throughout the trajectory before it can be used.
+The experimental runner is `benchmarks/bench_gpu_torch_block_trajectory.py`.
+
+### Full PyTorch GPU trajectory using the CPU block detector
+
+The trajectory benchmark was repeated with the exact same
+`_find_exact_hamiltonian_blocks` detector used by the CPU simulator. It unions
+exact nonzero support from the slow Hamiltonian and both microwave Hamiltonians
+at the initial time and every midpoint in the 1,000-step trajectory. Detection
+took 0.183 s on the CPU; propagation and all dense or blockwise eigensolves ran
+in PyTorch on the RTX 5070 Ti. Both variants used 250 detunings, four initial
+states, final-only output, one warmup, and five interleaved repeats.
+
+| PyTorch CUDA path | Mean ± std | Speedup | Maximum final-probability difference | Maximum final state-vector element difference |
+| --- | ---: | ---: | ---: | ---: |
+| Dense | 17.589 ± 0.758 s | baseline | — | — |
+| CPU-detector blocks | 10.477 ± 0.734 s | 1.679x | `1.62e-7` | `2.48e-8` |
+
+The earlier cached-partition trial above is rejected because it did not use this
+trajectory-wide support union. This run does use the CPU detector unchanged;
+the CPU block-detection method was not altered for the GPU experiment. The
+blockwise GPU solve agrees closely with dense PyTorch and saves an average of
+7.111 s per trajectory in this benchmark. Reproduce with:
+
+```powershell
+.\.venv\Scripts\python.exe benchmarks\bench_gpu_torch_block_trajectory.py --n-steps 1000 --batch 250 --warmup 1 --repeat 5 --output $env:TEMP\gpu_torch_block_trajectory_cpu_detector.json
+```

@@ -7,7 +7,7 @@ def _reorder_evecs_batched_np(V_in: np.ndarray, E_in: np.ndarray, V_ref: np.ndar
     # overlap[b, i, j] = | <v_in_i | v_ref_j> |
     overlap = np.abs(np.conj(np.swapaxes(V_in, -2, -1)) @ V_ref)
     best_j = np.argmax(overlap, axis=-1)  # (B, n)
-    order = np.argsort(best_j, axis=-1)  # (B, n)
+    order = np.argsort(best_j, axis=-1, kind="stable")  # (B, n)
 
     V_out = np.take_along_axis(V_in, order[..., None, :], axis=-1)
     E_out = np.take_along_axis(E_in, order, axis=-1)
@@ -74,13 +74,15 @@ def _simulate_batched_cpu(
 
 
 def main() -> None:
-    from state_prep_gpu._cupy import cupy
-
-    cp = cupy()
+    try:
+        import torch
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("Install PyTorch to run the tensor comparison example") from exc
 
     from state_prep_gpu.slow_hamiltonian import BatchedSlowHamiltonianTerms
     from state_prep_gpu.simulator import simulate_batched
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     rng = np.random.default_rng(0)
 
     T = 6
@@ -104,7 +106,10 @@ def main() -> None:
     }
 
     terms_gpu = BatchedSlowHamiltonianTerms(
-        **{k: cp.asarray(v, dtype=cp.complex128) for k, v in terms_np.items()}
+        **{
+            k: torch.as_tensor(v, dtype=torch.complex128, device=device)
+            for k, v in terms_np.items()
+        }
     )
 
     E_t = rng.normal(size=(T, B, 3))
@@ -115,8 +120,8 @@ def main() -> None:
 
     out_gpu = simulate_batched(
         terms=terms_gpu,
-        E_t=cp.asarray(E_t, dtype=cp.float64),
-        B_t=cp.asarray(B_t, dtype=cp.float64),
+        E_t=torch.as_tensor(E_t, dtype=torch.float64, device=device),
+        B_t=torch.as_tensor(B_t, dtype=torch.float64, device=device),
         psi0=psi0,
         dt=dt,
         H_mu_t=None,
@@ -125,14 +130,14 @@ def main() -> None:
     )
     probs_gpu = out_gpu.probabilities_final
     assert probs_gpu is not None
-    probs_gpu_np = cp.asnumpy(probs_gpu)
+    probs_gpu_np = probs_gpu.cpu().numpy()
 
     psi_cpu, probs_cpu_tracked = _simulate_batched_cpu(
         terms=terms_np, E_t=E_t, B_t=B_t, psi0=psi0, dt=dt
     )
 
-    psi_gpu_np = cp.asnumpy(out_gpu.psi_final)
-    last_evecs_gpu_np = cp.asnumpy(out_gpu.last_evecs)
+    psi_gpu_np = out_gpu.psi_final.cpu().numpy()
+    last_evecs_gpu_np = out_gpu.last_evecs.cpu().numpy()
 
     # Compare final states in QN basis (phase-sensitive) and QN populations (phase-insensitive).
     max_abs_psi = float(np.max(np.abs(psi_gpu_np - psi_cpu)))

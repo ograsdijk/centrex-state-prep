@@ -100,7 +100,7 @@ def _add_windows_cuda_dll_dirs() -> None:
 def cupy() -> Any:
     """Import and return `cupy`.
 
-    Kept behind a function so importing `state_prep_gpu` works without CuPy.
+    Used only by historical CuPy comparison benchmarks.
     """
 
     _add_windows_cuda_dll_dirs()
@@ -109,7 +109,7 @@ def cupy() -> Any:
         import cupy as cp  # type: ignore
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
-            "CuPy is required for `state_prep_gpu` execution. "
+            "CuPy is required only for this historical comparison benchmark. "
             "Install an appropriate CuPy build (e.g. cupy-cuda12x) and try again."
         ) from exc
 

@@ -18,7 +18,7 @@ Two packages, deliberately different in style:
 | Package | Style | Purpose |
 | --- | --- | --- |
 | `src/state_prep` | OOP, nested objects, callables on instances | Original CPU engine. The reference implementation. |
-| `src/state_prep_gpu` | Flat, functional, array-in/array-out | CuPy batched path for large scans. Optional dependency. |
+| `src/state_prep_gpu` | Flat, functional, array-in/array-out | PyTorch batched path for large scans. Optional dependency. |
 
 ## Environment & commands
 
@@ -31,9 +31,8 @@ uv pip install -e .                       # editable install of the package
 .\.venv\Scripts\python.exe <script.py>    # run anything in the venv
 ```
 
-GPU support is optional. Install CuPy separately (see
-`src/state_prep_gpu/README.md` for the Windows no-CUDA-Toolkit recipe using
-NVIDIA pip wheels).
+GPU support is optional. Install a PyTorch build appropriate for the system's
+CUDA setup (see `src/state_prep_gpu/README.md`).
 
 **There is a test suite; there is still no linter/formatter config.** Do not
 invent `ruff`/`black` invocations.
@@ -44,7 +43,7 @@ invent `ruff`/`black` invocations.
 
 The suite covers scan agreement (shared-slow versus repeated `run()`), the
 rotating-frame construction, and the public API. `tests/test_gpu.py` skips
-without CuPy. Tolerances live in `tests/conftest.py` and are named rather than
+without PyTorch. Tolerances live in `tests/conftest.py` and are named rather than
 inlined, because they cannot be a single number — see the comment there.
 
 Further verification, for anything the suite does not cover:
@@ -191,9 +190,9 @@ Flat and array-based on purpose — it does *not* consume `state_prep` objects.
 - `simulator.py` — `simulate_batched(...)` plus dense-microwave,
   scalar-envelope, compact-microwave, and shared-slow scan variants.
 - `_reorder.py` — batched eigenvector reordering on GPU.
-- `_cupy.py` — lazy CuPy import + Windows CUDA DLL directory setup. CuPy is
-  never imported at package import time; GPU entry points raise an actionable
-  error if it is missing.
+- `_torch.py` — lazy PyTorch import. PyTorch is never imported at package
+  import time; simulation entry points raise an actionable error if it is
+  missing.
 - `example_smoke.py`, `example_compare_cpu.py`, `benchmark_compare.py`,
   `benchmark_spa2_real.py` — runnable checks.
 
@@ -201,8 +200,8 @@ Inputs you must precompute: slow-Hamiltonian terms (`Hff`, `HSx/y/z`,
 `HZx/y/z`), field time series `E_t`, `B_t` with shape `(T, B, 3)`, and optionally
 `H_mu_t` with shape `(T-1, B, n, n)` plus a `D_mu` shift.
 
-Keep `state_prep_gpu` importable without CuPy. Any change that imports `cupy` at
-module scope is a bug.
+Keep `state_prep_gpu` importable without PyTorch. Any change that imports
+`torch` at module scope is a bug.
 
 ## Units & numerical conventions
 
@@ -241,8 +240,10 @@ These are domain-specific and easy to break. Follow them exactly.
   scalings are experiment-specific and look wrong out of context.
 - Don't rename public attributes crossing module boundaries: `QN`, `H_list`,
   `D`, `t_array`, `psis`, `V_ini`, `V_fin`, `probabilities_final`.
-- Don't add dependencies. Stack is `numpy`, `scipy`, `centrex_tlf`,
-  `matplotlib`, `pandas`, `polars`, `joblib`, `dill`, `tqdm`, `astropy`.
+- Don't add dependencies to the default install without a specific reason. The
+  optional `gpu` extra contains PyTorch; the CPU stack remains `numpy`, `scipy`,
+  `centrex_tlf`, `matplotlib`, `pandas`, `polars`, `joblib`, `dill`, `tqdm`,
+  and `astropy`.
 - Don't reformat whole files; keep diffs minimal.
 - Don't edit files under `.venv/`, `build/`, or `src/*.egg-info/`.
 - Don't rewrite notebooks wholesale — they carry executed outputs used for

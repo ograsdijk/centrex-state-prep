@@ -203,9 +203,12 @@ def main() -> None:
     from state_prep.utils import find_max_overlap_idx
     from state_prep.simulator import Simulator
 
-    from state_prep_gpu._cupy import cupy
     from state_prep_gpu.slow_hamiltonian import terms_from_centrex_tlf
     from state_prep_gpu.simulator import simulate_batched_scalar_microwaves_shared_slow
+
+    import torch
+    if not torch.cuda.is_available():
+        raise RuntimeError("This benchmark requires CUDA-enabled PyTorch")
 
     cfg = BenchConfig()
 
@@ -280,13 +283,14 @@ def main() -> None:
     cpu_prob_ini = cpu_res.probabilities_final[:, initial_state_idx, init_idx]
 
     # GPU run (same physics; compact microwave construction)
-    cp = cupy()
-
     # Slow Hamiltonian term matrices
     import centrex_tlf
 
     H_uncoupled_x = centrex_tlf.hamiltonian.generate_uncoupled_hamiltonian_X(cast(Any, hamiltonian.QN))
-    terms = terms_from_centrex_tlf(H_uncoupled_x, dtype=cp.complex128)
+    terms = terms_from_centrex_tlf(
+        H_uncoupled_x, dtype=torch.complex128, device="cuda"
+    )
+    device = terms.Hff.device
 
     # Time grid
     T_total = trajectory.get_T()
@@ -294,17 +298,23 @@ def main() -> None:
     dt = float(t_array[1] - t_array[0])
 
     # Field arrays (shared across batch)
-    E_t, B_t = _compute_EB_t(
+    E_t_np, B_t_np = _compute_EB_t(
         trajectory=trajectory,
         electric_field=electric_field,
         magnetic_field=magnetic_field,
         t_array=t_array,
     )
+    E_t = torch.as_tensor(E_t_np, dtype=torch.float64, device=device)
+    B_t = torch.as_tensor(B_t_np, dtype=torch.float64, device=device)
 
     # Initial state vectors in QN basis (same mapping as CPU)
     H0 = hamiltonian.get_H_t_func()(0.0)
     simulator.init_state_vecs(H0)
-    psi0 = np.repeat(simulator.psis[None, :, :], batch, axis=0)
+    psi0 = torch.as_tensor(
+        np.repeat(simulator.psis[None, :, :], batch, axis=0),
+        dtype=torch.complex128,
+        device=device,
+    )
 
     # Monitor vectors in QN basis
     monitor_vecs = np.stack([s.state_vector(cast(Any, hamiltonian.QN)) for s in monitor_states], axis=0)
@@ -324,6 +334,19 @@ def main() -> None:
         n=n,
     )
     amp_t = _microwave_amp_t_np(microwave_fields, trajectory=trajectory, t_array=t_array)
+    H_mu_base_fields = torch.as_tensor(
+        H_mu_base_fields, dtype=torch.complex128, device=device
+    )
+    amp_t = torch.as_tensor(amp_t, dtype=torch.complex128, device=device)
+    coupling_scales = torch.as_tensor(
+        coupling_scales, dtype=torch.float64, device=device
+    )
+    D_mu_diag_batch = torch.as_tensor(
+        D_mu_diag_batch, dtype=torch.complex128, device=device
+    )
+    monitor_vecs = torch.as_tensor(
+        monitor_vecs, dtype=torch.complex128, device=device
+    )
 
     # Warmup + timed run
     out_gpu = simulate_batched_scalar_microwaves_shared_slow(
@@ -339,7 +362,7 @@ def main() -> None:
         monitor_state_vectors=monitor_vecs,
         return_final_probabilities=True,
     )
-    cp.cuda.Stream.null.synchronize()
+    torch.cuda.synchronize(device)
 
     t2 = time.perf_counter()
     out_gpu = simulate_batched_scalar_microwaves_shared_slow(
@@ -355,10 +378,10 @@ def main() -> None:
         monitor_state_vectors=monitor_vecs,
         return_final_probabilities=True,
     )
-    cp.cuda.Stream.null.synchronize()
+    torch.cuda.synchronize(device)
     t3 = time.perf_counter()
 
-    probs_gpu = cp.asnumpy(out_gpu.probabilities_final)
+    probs_gpu = out_gpu.probabilities_final.cpu().numpy()
 
     # Compare final probabilities (same tracked slow-eigenbasis semantics)
     max_diff = float(np.max(np.abs(cpu_res.probabilities_final - probs_gpu)))
@@ -367,7 +390,7 @@ def main() -> None:
     print(f"Config: N_steps={cfg.n_steps}  batch(detunings)={batch}  n={n}")
     print(f"muW_freq_2: {muW_freq_2/1e9:.6f} GHz")
     print(f"CPU run_microwave_scan: {t1 - t0:.3f} s")
-    print(f"GPU simulate_batched_scalar_microwaves_shared_slow: {t3 - t2:.3f} s")
+    print(f"PyTorch GPU shared-slow simulation: {t3 - t2:.3f} s")
     if (t3 - t2) > 0:
         print(f"Speedup: {(t1 - t0) / (t3 - t2):.2f}x")
     print(f"Max |Δprobabilities_final|: {max_diff:.3e}")

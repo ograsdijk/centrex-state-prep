@@ -1,62 +1,64 @@
 # `state_prep_gpu`
 
-Minimal batched GPU (CuPy) implementation for centrex-state-prep.
-
-## Why this exists
-
-The original `state_prep` code builds Hamiltonians through nested OOP calls. This
-GPU path is intentionally *flat* and operates on *precomputed arrays* so it's
-simple to use in ensemble scans.
+PyTorch implementation of the batched state-preparation simulator. It is a
+separate, array-based GPU path; the object-oriented CPU implementation remains
+in `state_prep` and does not depend on PyTorch.
 
 ## What you provide
 
-- Precomputed slow-Hamiltonian terms (`Hff`, `HSx`, `HSy`, `HSz`, `HZx`, `HZy`, `HZz`).
-  These come from `centrex_tlf.hamiltonian.generate_uncoupled_hamiltonian_X(...)`.
-- Time series of field vectors `E_t`, `B_t` with shape `(T, B, 3)`.
-- Optional precomputed microwave Hamiltonians `H_mu_t` in the QN basis with shape
-  `(T-1, B, n, n)` and a rotating-frame/ detuning shift `D_mu`.
+- Precomputed slow-Hamiltonian terms (`Hff`, `HSx`, `HSy`, `HSz`, `HZx`, `HZy`,
+  `HZz`) from `centrex_tlf.hamiltonian.generate_uncoupled_hamiltonian_X(...)`.
+- Electric and magnetic field arrays `E_t`, `B_t`, typically shaped
+  `(T, B, 3)`.
+- Initial state vectors shaped `(B, S, n)` and, when using the general
+  microwave path, microwave Hamiltonians shaped `(T-1, B, n, n)`.
+
+`terms_from_centrex_tlf(...)` converts Hamiltonian terms to PyTorch tensors. It
+places them on CUDA when available and otherwise uses the CPU. You can choose a
+device explicitly with its `device` argument. Simulation inputs are moved to
+the same device as the terms, and outputs are PyTorch tensors on that device.
 
 ## API
 
 - `state_prep_gpu.slow_hamiltonian_batch(terms, E, B)`
 - `state_prep_gpu.simulate_batched(...)`
+- `state_prep_gpu.simulator.simulate_batched_compact_microwaves(...)`
+- `state_prep_gpu.simulator.simulate_batched_scalar_microwaves(...)`
+- `state_prep_gpu.simulator.simulate_batched_scalar_microwaves_shared_slow(...)`
 
-## CuPy
+The scan dimension is `B`; initial states are propagated together on the `S`
+axis. The general and scalar-microwave simulators accept per-point time steps
+shaped `(T-1, B)`. Scalar-microwave simulators also accept per-point envelopes
+shaped `(T-1, B, M)`.
 
-CuPy is optional and not imported at module import time. If you call a GPU
-function without CuPy installed, you'll get an actionable error.
+For midpoint propagation, pass midpoint-sampled `E_t`, `B_t`, and microwave
+envelopes, and provide separate `E0`/`B0` values at the true initial position
+for initial-state and monitor mapping. Simulators return final states and
+probabilities by default. Pass `store_every=1` to retain every state, or a
+larger positive stride for a downsampled history.
 
-### Windows (recommended)
+## Install PyTorch
 
-On Windows, CuPy often needs CUDA DLLs (NVRTC, cuBLAS, etc.) available via the
-Windows DLL search path. This repo supports a **no-CUDA-Toolkit install** using
-NVIDIA's pip packages.
-
-In this repo's venv:
+PyTorch is optional so CPU-only users can install and import the package without
+it. Install a PyTorch build that matches the machine and CUDA driver, then
+install the project with its GPU extra:
 
 ```powershell
-uv pip install cupy-cuda12x
-uv pip install nvidia-cuda-nvrtc-cu12 nvidia-cuda-runtime-cu12
-uv pip install nvidia-cublas-cu12 nvidia-cusolver-cu12 nvidia-cusparse-cu12 nvidia-curand-cu12 nvidia-cufft-cu12
-uv pip install -e .
+uv pip install torch
+uv pip install -e ".[gpu]"
 ```
 
-Notes:
-- Your NVIDIA driver must support CUDA 12.x (your `nvidia-smi` prints a CUDA Version).
-- You may see a CuPy warning about `CUDA_PATH` not being detected; that’s OK when
-  using the pip-provided CUDA DLLs.
+If your platform needs a specific PyTorch package index or CUDA build, follow
+the selection instructions at pytorch.org and install that build in place of
+the first command. The `gpu` extra records the runtime dependency for project
+metadata.
 
-### Linux
+## Examples and benchmarks
 
-Install an appropriate build for your CUDA version, e.g.
+- Synthetic propagation smoke check: `src/state_prep_gpu/example_smoke.py`
+- CPU comparison: `src/state_prep_gpu/example_compare_cpu.py`
+- CPU/GPU benchmark: `src/state_prep_gpu/benchmark_compare.py`
+- SPA2 microwave scan benchmark: `benchmarks/bench_gpu_torch_full_spa2.py`
 
-- `pip install cupy-cuda12x`
-
-(Exact package depends on your system.)
-
-## Tests / examples
-
-- Smoke test (GPU runs + probabilities normalize): `src/state_prep_gpu/example_smoke.py`
-- CPU vs GPU numerical check (slow-H only): `src/state_prep_gpu/example_compare_cpu.py`
-- CPU vs GPU performance benchmark (slow-H only): `src/state_prep_gpu/benchmark_compare.py`
-- CPU vs GPU benchmark including microwaves (SPA2-like scan): `src/state_prep_gpu/benchmark_spa2_real.py`
+Run GPU examples with a CUDA-enabled PyTorch build. The SPA2 benchmark compares
+the PyTorch implementation against the CPU scan path.

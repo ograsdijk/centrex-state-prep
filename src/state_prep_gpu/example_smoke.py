@@ -5,14 +5,15 @@ import numpy as np
 
 def main() -> None:
     try:
-        import cupy as cp  # type: ignore
+        import torch
     except ModuleNotFoundError:
-        print("CuPy not installed; skipping GPU smoke test.")
+        print("PyTorch not installed; skipping tensor smoke test.")
         return
 
     from state_prep_gpu.slow_hamiltonian import BatchedSlowHamiltonianTerms
     from state_prep_gpu.simulator import simulate_batched
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     rng = np.random.default_rng(0)
 
     T = 6
@@ -25,17 +26,17 @@ def main() -> None:
         return (a + a.conj().T) / 2
 
     terms = BatchedSlowHamiltonianTerms(
-        Hff=cp.asarray(hermitian(), dtype=cp.complex128),
-        HSx=cp.asarray(hermitian(), dtype=cp.complex128),
-        HSy=cp.asarray(hermitian(), dtype=cp.complex128),
-        HSz=cp.asarray(hermitian(), dtype=cp.complex128),
-        HZx=cp.asarray(hermitian(), dtype=cp.complex128),
-        HZy=cp.asarray(hermitian(), dtype=cp.complex128),
-        HZz=cp.asarray(hermitian(), dtype=cp.complex128),
+        Hff=torch.as_tensor(hermitian(), dtype=torch.complex128, device=device),
+        HSx=torch.as_tensor(hermitian(), dtype=torch.complex128, device=device),
+        HSy=torch.as_tensor(hermitian(), dtype=torch.complex128, device=device),
+        HSz=torch.as_tensor(hermitian(), dtype=torch.complex128, device=device),
+        HZx=torch.as_tensor(hermitian(), dtype=torch.complex128, device=device),
+        HZy=torch.as_tensor(hermitian(), dtype=torch.complex128, device=device),
+        HZz=torch.as_tensor(hermitian(), dtype=torch.complex128, device=device),
     )
 
-    E_t = cp.asarray(rng.normal(size=(T, B, 3)), dtype=cp.float64)
-    B_t = cp.asarray(rng.normal(size=(T, B, 3)), dtype=cp.float64)
+    E_t = rng.normal(size=(T, B, 3))
+    B_t = rng.normal(size=(T, B, 3))
 
     psi0 = rng.normal(size=(B, S, n)) + 1j * rng.normal(size=(B, S, n))
     psi0 = psi0 / np.linalg.norm(psi0, axis=-1, keepdims=True)
@@ -53,7 +54,7 @@ def main() -> None:
 
     probs = out.probabilities_final
     assert probs is not None
-    print("ok", probs.shape, float(cp.sum(probs[0, 0]).get()))
+    print("ok", tuple(probs.shape), float(probs[0, 0].sum().item()))
 
 
 if __name__ == "__main__":

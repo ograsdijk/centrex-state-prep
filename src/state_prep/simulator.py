@@ -55,6 +55,129 @@ def limit_blas_threads(limit: Optional[int]) -> Iterator[None]:
         yield
 
 
+def _find_exact_hamiltonian_blocks(
+    hamiltonians: List[Callable[[float], np.ndarray]],
+    t_array: np.ndarray,
+    time_sampling: str,
+) -> Optional[List[np.ndarray]]:
+    """Find exact invariant basis blocks across all sampled Hamiltonian terms.
+
+    The union of supports is used so each returned block is valid for every
+    supplied Hamiltonian at every time sampled by the propagation. Exact zeros
+    are required; near-zero matrix elements are never discarded here.
+    """
+    if not hamiltonians:
+        return None
+
+    t_array = np.asarray(t_array, dtype=float)
+    sample_offset = _sample_offset(time_sampling)
+    sample_times = np.concatenate(
+        (t_array[:1], t_array[:-1] + sample_offset * np.diff(t_array))
+    )
+    first = np.asarray(hamiltonians[0](float(sample_times[0])))
+    if first.ndim != 2 or first.shape[0] != first.shape[1]:
+        return None
+    n = first.shape[0]
+    if n <= 1:
+        return None
+    adjacency = np.zeros((n, n), dtype=bool)
+
+    def connected() -> bool:
+        seen = {0}
+        stack = [0]
+        while stack:
+            node = stack.pop()
+            for neighbor in np.flatnonzero(adjacency[node]):
+                neighbor = int(neighbor)
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    stack.append(neighbor)
+        return len(seen) == n
+
+    for hamiltonian in hamiltonians:
+        for t in sample_times:
+            matrix = np.asarray(hamiltonian(float(t)))
+            if matrix.shape != (n, n):
+                return None
+            support = np.abs(matrix) > 0
+            support |= support.T
+            np.fill_diagonal(support, False)
+            if np.any(support & ~adjacency):
+                adjacency |= support
+                if connected():
+                    return None
+
+    adjacency |= adjacency.T
+    np.fill_diagonal(adjacency, False)
+    seen: set[int] = set()
+    blocks: List[np.ndarray] = []
+    for start in range(n):
+        if start in seen:
+            continue
+        seen.add(start)
+        stack = [start]
+        component = []
+        while stack:
+            node = stack.pop()
+            component.append(node)
+            for neighbor in np.flatnonzero(adjacency[node]):
+                neighbor = int(neighbor)
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    stack.append(neighbor)
+        blocks.append(np.asarray(sorted(component), dtype=np.int64))
+
+    if len(blocks) <= 1:
+        return None
+    cubic_work_ratio = sum(len(block) ** 3 for block in blocks) / n**3
+    if cubic_work_ratio >= 0.8:
+        return None
+    return blocks
+
+
+def _eigh_in_blocks(
+    matrix: np.ndarray,
+    blocks: List[np.ndarray],
+    eig_backend: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Diagonalize independent Hermitian subspaces and globally sort eigenpairs.
+
+    Returns eigenvalues, eigenvectors, and a block ID for each eigenvector.
+    ``blocks`` may be non-contiguous index groups, as in a rotating-frame basis.
+    """
+    if eig_backend not in {"zheevd", "numpy"}:
+        raise ValueError("Unknown eig_backend. Expected 'zheevd' or 'numpy'.")
+
+    n = matrix.shape[0]
+    values = np.empty(n, dtype=np.float64)
+    vectors = np.zeros((n, n), dtype=np.complex128)
+    labels = np.empty(n, dtype=np.int64)
+    column = 0
+    for block_id, indices in enumerate(blocks):
+        submatrix = np.ascontiguousarray(matrix[np.ix_(indices, indices)])
+        if eig_backend == "zheevd":
+            block_values, block_vectors, info = zheevd(submatrix)
+            if info != 0:
+                block_values, block_vectors = np.linalg.eigh(submatrix)
+        else:
+            block_values, block_vectors = np.linalg.eigh(submatrix)
+
+        width = len(indices)
+        columns = np.arange(column, column + width)
+        values[columns] = block_values
+        vectors[np.ix_(indices, columns)] = block_vectors
+        labels[columns] = block_id
+        column += width
+
+    order = np.argsort(values, kind="stable")
+    return values[order], vectors[:, order], labels[order]
+
+
+def _indices_for_block_labels(labels: np.ndarray) -> List[np.ndarray]:
+    """Return eigenvector-column groups for each block ID."""
+    return [np.flatnonzero(labels == block_id) for block_id in np.unique(labels)]
+
+
 def _sample_offset(time_sampling: str) -> float:
     """Fraction of the step at which `H` is evaluated.
 
@@ -1301,6 +1424,7 @@ class Simulator:
         step_density=None,
         step_density_order: int = 2,
         time_sampling: str = "mid",
+        block_eigh: bool = True,
     ):
         """
         Runs the simulation.
@@ -1395,6 +1519,13 @@ class Simulator:
             shows up as a smaller error constant: about 4x fewer steps at
             `N_steps=1000`, 3.3x at 2000, and no measurable difference by 16000.
             See `_sample_offset`.
+
+        block_eigh:
+            Automatically detect exact invariant Hamiltonian blocks and solve
+            them independently. The detector checks all Hamiltonian terms at
+            every sampled time, including every configured microwave field.
+            Dense eigensolves are used when no split is found. Set False to
+            force the dense path.
         """
         if store_every < 1:
             raise ValueError("store_every must be >= 1")
@@ -1453,6 +1584,13 @@ class Simulator:
             density=self._resolve_step_density(step_density, H_t, muw_hams),
             order=step_density_order,
         )
+        eigen_blocks = (
+            _find_exact_hamiltonian_blocks(
+                [H_t, *(muw_hams or [])], t_array, time_sampling
+            )
+            if block_eigh
+            else None
+        )
 
         # Indices to store output (downsampled)
         save_idx = np.arange(0, N_steps, store_every, dtype=int)
@@ -1488,6 +1626,7 @@ class Simulator:
                     store_final_monitor_probabilities=store_final_monitor_probabilities,
                     eig_backend=eig_backend,
                     time_sampling=time_sampling,
+                    eigen_blocks=eigen_blocks,
                 )
             else:
                 (
@@ -1515,6 +1654,7 @@ class Simulator:
                     store_final_monitor_probabilities=store_final_monitor_probabilities,
                     eig_backend=eig_backend,
                     time_sampling=time_sampling,
+                    eigen_blocks=eigen_blocks,
                 )
 
         # Generate a result object
@@ -1583,6 +1723,7 @@ class Simulator:
         step_density_order: int = 2,
         time_sampling: str = "mid",
         propagator: str = "frozen",
+        block_eigh: bool = True,
     ) -> MicrowaveScanResult:
         """Run a batched microwave scan reusing the slow diagonalization.
 
@@ -1705,6 +1846,13 @@ class Simulator:
           Which case you are in is answerable without propagating anything:
           `benchmarks/bench_magnus_commutator.py` computes the truncated term
           directly. Do that before selecting `"magnus"` for a new setup.
+
+        block_eigh:
+            Automatically detect exact invariant Hamiltonian blocks shared by
+            every scan point and solve them independently. The detector includes
+            all configured microwave fields; detunings are diagonal and power
+            prefactors do not change the coupling support. Dense eigensolves are
+            used when no split is found. Set False to force dense solves.
         """
         # Validate here, not only in the loops, so a bad name is rejected before
         # any work is done rather than on the first timestep.
@@ -1792,6 +1940,7 @@ class Simulator:
                 eig_backend=eig_backend,
                 workers=workers,
                 allow_multitone_same_manifold=allow_multitone_same_manifold,
+                block_eigh=block_eigh,
                 blas_threads=blas_threads,
                 step_density=step_density,
                 step_density_order=step_density_order,
@@ -1824,6 +1973,11 @@ class Simulator:
             N_steps,
             density=self._resolve_step_density(step_density, H_t, muw_hams),
             order=step_density_order,
+        )
+        eigen_blocks = (
+            _find_exact_hamiltonian_blocks([H_t, *muw_hams], t_array, time_sampling)
+            if block_eigh
+            else None
         )
 
         if multitone_jes:
@@ -1876,6 +2030,7 @@ class Simulator:
                     eig_backend=eig_backend,
                     time_sampling=time_sampling,
                     propagator=propagator,
+                    eigen_blocks=eigen_blocks,
                 )
         else:
             with limit_blas_threads(blas_threads):
@@ -1898,6 +2053,7 @@ class Simulator:
                     eig_backend=eig_backend,
                     time_sampling=time_sampling,
                     propagator=propagator,
+                    eigen_blocks=eigen_blocks,
                 )
 
         return MicrowaveScanResult(
@@ -1937,6 +2093,7 @@ class Simulator:
         step_density_order: int = 2,
         time_sampling: str = "mid",
         propagator: str = "frozen",
+        block_eigh: bool = True,
     ) -> MicrowaveScanResult:
         propagator = _normalize_propagator(propagator)
         batch = int(detunings_hz.shape[0])
@@ -1959,6 +2116,7 @@ class Simulator:
                 step_density_order=step_density_order,
                 time_sampling=time_sampling,
                 propagator=propagator,
+                block_eigh=block_eigh,
             )
 
         chunk_indices = np.array_split(np.arange(batch), n_jobs)
@@ -1981,6 +2139,7 @@ class Simulator:
                 step_density_order=step_density_order,
                 time_sampling=time_sampling,
                 propagator=propagator,
+                block_eigh=block_eigh,
             )
 
         results = Parallel(n_jobs=n_jobs, backend="loky")(
@@ -2037,6 +2196,7 @@ class Simulator:
         eig_backend: str,
         time_sampling: str = "mid",
         propagator: str = "frozen",
+        eigen_blocks: Optional[List[np.ndarray]] = None,
     ):
         """Batched microwave evolution with shared slow diagonalization.
 
@@ -2069,7 +2229,12 @@ class Simulator:
         diag_idx = slice(None, None, n + 1)
 
         # Reference eigen-decomposition at t0 (reused for init + tracking)
-        E_ref, V_ref = np.linalg.eigh(H_tini)
+        if eigen_blocks is None:
+            E_ref, V_ref = np.linalg.eigh(H_tini)
+        else:
+            E_ref, V_ref, _ = _eigh_in_blocks(
+                H_tini, eigen_blocks, eig_backend
+            )
         index = np.argsort(E_ref)
         E_ref = E_ref[index]
         V_ref = V_ref[:, index]
@@ -2105,7 +2270,11 @@ class Simulator:
 
             # Shared slow Hamiltonian diagonalization (once per timestep)
             H_slow_i = H_slow_t(t_sample)
-            if eig_backend == "zheevd":
+            if eigen_blocks is not None:
+                D, V, slow_labels = _eigh_in_blocks(
+                    H_slow_i, eigen_blocks, eig_backend
+                )
+            elif eig_backend == "zheevd":
                 D, V, info = zheevd(H_slow_i)
                 if info != 0:
                     D, V = np.linalg.eigh(H_slow_i)
@@ -2162,7 +2331,11 @@ class Simulator:
                 H_rot.flat[diag_idx] += D_mu_diag_batch[b]
 
                 # Diagonalize rotating-frame Hamiltonian (per scan point)
-                if eig_backend == "zheevd":
+                if eigen_blocks is not None:
+                    D_rot, V_rot, _ = _eigh_in_blocks(
+                        H_rot, _indices_for_block_labels(slow_labels), eig_backend
+                    )
+                elif eig_backend == "zheevd":
                     D_rot, V_rot, info_rot = zheevd(H_rot)
                     if info_rot != 0:
                         D_rot, V_rot = np.linalg.eigh(H_rot)
@@ -2212,6 +2385,7 @@ class Simulator:
         eig_backend: str,
         time_sampling: str = "mid",
         propagator: str = "frozen",
+        eigen_blocks: Optional[List[np.ndarray]] = None,
     ):
         """Batched shared-slow evolution with beat phases for same-manifold tones."""
         # `"frozen"` freezes `H` at the sample point and exponentiates that
@@ -2244,7 +2418,12 @@ class Simulator:
 
         diag_idx = slice(None, None, n + 1)
 
-        E_ref, V_ref = np.linalg.eigh(H_tini)
+        if eigen_blocks is None:
+            E_ref, V_ref = np.linalg.eigh(H_tini)
+        else:
+            E_ref, V_ref, _ = _eigh_in_blocks(
+                H_tini, eigen_blocks, eig_backend
+            )
         index = np.argsort(E_ref)
         E_ref = E_ref[index]
         V_ref = V_ref[:, index]
@@ -2271,7 +2450,11 @@ class Simulator:
             t_sample = t + sample_offset * dt
 
             H_slow_i = H_slow_t(t_sample)
-            if eig_backend == "zheevd":
+            if eigen_blocks is not None:
+                D, V, slow_labels = _eigh_in_blocks(
+                    H_slow_i, eigen_blocks, eig_backend
+                )
+            elif eig_backend == "zheevd":
                 D, V, info = zheevd(H_slow_i)
                 if info != 0:
                     D, V = np.linalg.eigh(H_slow_i)
@@ -2378,7 +2561,11 @@ class Simulator:
                 H_rot.flat[diag_idx] += D
                 H_rot.flat[diag_idx] += D_mu_diag_batch[b]
 
-                if eig_backend == "zheevd":
+                if eigen_blocks is not None:
+                    D_rot, V_rot, _ = _eigh_in_blocks(
+                        H_rot, _indices_for_block_labels(slow_labels), eig_backend
+                    )
+                elif eig_backend == "zheevd":
                     D_rot, V_rot, info_rot = zheevd(H_rot)
                     if info_rot != 0:
                         D_rot, V_rot = np.linalg.eigh(H_rot)
@@ -2425,6 +2612,7 @@ class Simulator:
         store_final_monitor_probabilities: bool,
         eig_backend: str,
         time_sampling: str = "mid",
+        eigen_blocks: Optional[List[np.ndarray]] = None,
     ):
         """
         Time evolves the system using the Hamiltonian function H_t
@@ -2437,7 +2625,12 @@ class Simulator:
         H_tini = H_slow(t_array[0])
 
         # Reference eigen-decomposition at t0 (reused for init + storage)
-        E_ref, V_ref = np.linalg.eigh(H_tini)
+        if eigen_blocks is None:
+            E_ref, V_ref = np.linalg.eigh(H_tini)
+        else:
+            E_ref, V_ref, _ = _eigh_in_blocks(
+                H_tini, eigen_blocks, eig_backend
+            )
         V_ref_ini = V_ref
 
         monitor_idx: Optional[np.ndarray] = None
@@ -2489,7 +2682,9 @@ class Simulator:
             H_slow_i = H_slow(t_sample)
 
             # Diagonalize Hamiltonian
-            if eig_backend == "zheevd":
+            if eigen_blocks is not None:
+                D, V, _ = _eigh_in_blocks(H_slow_i, eigen_blocks, eig_backend)
+            elif eig_backend == "zheevd":
                 D, V, info = zheevd(H_slow_i)
                 if info != 0:
                     D, V = np.linalg.eigh(H_slow_i)
@@ -2569,6 +2764,7 @@ class Simulator:
         store_final_monitor_probabilities: bool,
         eig_backend: str,
         time_sampling: str = "mid",
+        eigen_blocks: Optional[List[np.ndarray]] = None,
     ):
         """
         Time evolves the system using the Hamiltonian function H_t
@@ -2581,7 +2777,12 @@ class Simulator:
         H_tini = H_slow_t(t_array[0])
 
         # Reference eigen-decomposition at t0 (reused for init + storage)
-        E_ref, V_ref = np.linalg.eigh(H_tini)
+        if eigen_blocks is None:
+            E_ref, V_ref = np.linalg.eigh(H_tini)
+        else:
+            E_ref, V_ref, _ = _eigh_in_blocks(
+                H_tini, eigen_blocks, eig_backend
+            )
         index = np.argsort(E_ref)
         E_ref = E_ref[index]
         V_ref = V_ref[:, index]
@@ -2638,7 +2839,11 @@ class Simulator:
 
             # Diagonalize slow Hamiltonian and transfer to basis where it is
             # diagonal
-            if eig_backend == "zheevd":
+            if eigen_blocks is not None:
+                D, V, slow_labels = _eigh_in_blocks(
+                    H_slow_i, eigen_blocks, eig_backend
+                )
+            elif eig_backend == "zheevd":
                 D, V, info = zheevd(H_slow_i)
                 if info != 0:
                     D, V = np.linalg.eigh(H_slow_i)
@@ -2660,7 +2865,11 @@ class Simulator:
             H_rot[np.diag_indices_from(H_rot)] += D
 
             # Diagonalize the Hamiltonian in the rotating frame
-            if eig_backend == "zheevd":
+            if eigen_blocks is not None:
+                D_rot, V_rot, _ = _eigh_in_blocks(
+                    H_rot, _indices_for_block_labels(slow_labels), eig_backend
+                )
+            elif eig_backend == "zheevd":
                 D_rot, V_rot, info_rot = zheevd(H_rot)
                 if info_rot != 0:
                     D_rot, V_rot = np.linalg.eigh(H_rot)

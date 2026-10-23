@@ -1,11 +1,11 @@
-"""GPU-accelerated (CuPy) batched simulation utilities.
+"""GPU-accelerated (PyTorch) batched simulation utilities.
 
 This package is intentionally separate from `state_prep` and keeps the API
 flat/functional to avoid the deep OOP call chain in the original code.
 
-CuPy is an optional dependency. Importing `state_prep_gpu` does not require
-CuPy; functions that execute on GPU will raise a helpful error if CuPy is
-missing.
+PyTorch is an optional dependency. Importing `state_prep_gpu` does not require
+PyTorch; functions that execute the simulation will raise a helpful error if
+PyTorch is missing.
 """
 
 from .slow_hamiltonian import (
