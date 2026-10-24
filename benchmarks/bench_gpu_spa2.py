@@ -59,6 +59,7 @@ def make_torch_runner(
     detunings: np.ndarray,
     intensity_prefactors: np.ndarray,
     complex_dtype: str = "complex128",
+    block_eigh: bool | str = "auto",
 ):
     """Prepare a full PyTorch GPU propagation runner for the SPA2 scan."""
     import centrex_tlf
@@ -151,6 +152,7 @@ def make_torch_runner(
             return_final_probabilities=True,
             store_every=store_every,
             profile_timings=profile_timings,
+            block_eigh=block_eigh,
             **inputs,
         )
 

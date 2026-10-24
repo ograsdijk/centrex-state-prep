@@ -23,14 +23,9 @@ def _slow_hamiltonian(terms: tuple[torch.Tensor, ...], E, B):
 
 
 def _reorder_eigenvectors(values, vectors, reference):
-    """Match the current greedy CuPy ordering rule using PyTorch operations."""
-    overlap = torch.abs(vectors.mH @ reference)
-    order = torch.argsort(torch.argmax(overlap, dim=-1), dim=-1, stable=True)
-    values_out = torch.gather(values, -1, order)
-    vectors_out = torch.gather(
-        vectors, -1, order.unsqueeze(-2).expand(*order.shape[:-1], vectors.shape[-2], -1)
-    )
-    return values_out, vectors_out
+    from state_prep_gpu._reorder import reorder_evecs_batched
+
+    return reorder_evecs_batched(vectors, values, reference)
 
 
 def _eigh_in_blocks(matrix, blocks):
@@ -95,8 +90,8 @@ def simulate_torch_shared_slow(
     """Full PyTorch implementation of the CuPy shared-slow SPA2 loop.
 
     All tensors are expected to be resident on one CUDA device for the whole
-    evolution. The eigenvector matching follows the greedy GPU rule used by
-    `state_prep_gpu._reorder`; no CuPy operations are used in this function.
+    evolution. Eigenvector matching delegates to the production optimal
+    assignment and phase alignment; no CuPy operations are used here.
     """
     batch, n_states, n = psi0.shape
     T = E_t.shape[0]

@@ -118,3 +118,5 @@ run-to-run noise.
 - `IMPROVEMENTS.md` — measured performance findings and the open backlog.
 - `PERFORMANCE_BENCHMARK_RESULTS.md` — recorded benchmark numbers with the
   environment they were taken in.
+- `PERFORMANCE_QUICKSTART.md` — local performance updates and resumable CPU/GPU
+  concurrent scans, with parameter and setup-file instructions.

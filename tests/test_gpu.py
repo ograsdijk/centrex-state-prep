@@ -16,8 +16,8 @@ SINGLE_PRECISION_TOL = 3e-6
 
 
 @pytest.mark.parametrize("device_name", DEVICES)
-def test_reorder_preserves_input_order_for_equal_overlap_matches(device_name):
-    """Tied greedy matches retain the stable ordering of the former CuPy path."""
+def test_reorder_finds_optimal_assignment_for_equal_overlap_matches(device_name):
+    """Ties must preserve the optimal objective and align complex phases."""
     from state_prep_gpu._reorder import reorder_evecs_batched
 
     n = 32
@@ -27,15 +27,14 @@ def test_reorder_preserves_input_order_for_equal_overlap_matches(device_name):
     vectors = vectors[:, permutation].to(device_name)
     values = torch.arange(n, dtype=torch.float64, device=device_name)
     reference = torch.eye(n, dtype=torch.complex128, device=device_name)
-    matches = torch.argmax(torch.abs(vectors.mH @ reference), dim=-1).cpu().tolist()
-    expected_order = sorted(range(n), key=matches.__getitem__)
-
     actual_values, actual_vectors = reorder_evecs_batched(
         vectors[None], values[None], reference[None]
     )
 
-    assert torch.equal(actual_values[0], values[expected_order])
-    assert torch.equal(actual_vectors[0], vectors[:, expected_order])
+    overlaps = reference.mH @ actual_vectors[0]
+    assert torch.allclose(overlaps.diagonal().real, torch.full((n,), 1 / np.sqrt(2), dtype=torch.float64, device=device_name))
+    assert overlaps.diagonal().imag.abs().max() < 1e-14
+    assert torch.equal(actual_values[0].sort().values, values)
 
 
 def test_slow_hamiltonian_matches_cpu(spa2_setup):

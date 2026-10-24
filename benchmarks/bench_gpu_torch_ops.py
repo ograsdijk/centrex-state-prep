@@ -141,7 +141,9 @@ def main() -> None:
 
     operations = {
         "slow_hamiltonian_assembly": (slow_cupy, slow_torch),
-        "slow_eigenvector_reordering": (reorder_cupy, reorder_torch),
+        # Historical operation comparison only. Production tracking now uses
+        # optimal assignment and phase alignment, measured by bench_gpu_assignment.
+        "legacy_greedy_eigenvector_reordering": (reorder_cupy, reorder_torch),
         "microwave_rotation_and_assembly": (microwave_cupy, microwave_torch),
         "state_update": (update_cupy, update_torch),
     }

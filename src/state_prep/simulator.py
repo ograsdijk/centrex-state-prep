@@ -2300,6 +2300,11 @@ class Simulator:
             # approximation.
             psis_slow = psis_batch @ V.conj()
 
+            rotating_blocks = (
+                _indices_for_block_labels(slow_labels)
+                if eigen_blocks is not None else None
+            )
+
             for b in range(batch):
                 # Assemble rotating-frame Hamiltonian (in slow-eigenbasis)
                 H_rot = (coupling_scales[b, 0] * H_mu_rot[0]).copy()
@@ -2333,7 +2338,7 @@ class Simulator:
                 # Diagonalize rotating-frame Hamiltonian (per scan point)
                 if eigen_blocks is not None:
                     D_rot, V_rot, _ = _eigh_in_blocks(
-                        H_rot, _indices_for_block_labels(slow_labels), eig_backend
+                        H_rot, rotating_blocks, eig_backend
                     )
                 elif eig_backend == "zheevd":
                     D_rot, V_rot, info_rot = zheevd(H_rot)
@@ -2479,7 +2484,7 @@ class Simulator:
             beat_phases = [
                 (field_idx, np.exp(-1j * delta_omega * t_sample))
                 for field_idx, delta_omega in beat_fields
-            ]
+            ] if propagator == "frozen" else []
             # The exact propagator freezes the beat at `t_sample` (midpoint
             # sampling, second order). Magnus integrates it across the step
             # instead, and its kernel is anchored at the left endpoint.
@@ -2491,19 +2496,12 @@ class Simulator:
             # factors out of the propagator and can be applied once per timestep.
             psis_slow = psis_batch @ V.conj()
 
-            for b in range(batch):
-                H_rot = np.zeros((n, n), dtype=np.complex128)
-                for field_idx in static_field_indices:
-                    H_rot += coupling_scales[b, field_idx] * (
-                        upper_rot[field_idx] + lower_rot[field_idx]
-                    )
-                for field_idx, phases in beat_phases:
-                    phase = phases[b]
-                    H_rot += coupling_scales[b, field_idx] * (
-                        phase * upper_rot[field_idx]
-                        + phase.conjugate() * lower_rot[field_idx]
-                    )
+            rotating_blocks = (
+                _indices_for_block_labels(slow_labels)
+                if eigen_blocks is not None else None
+            )
 
+            for b in range(batch):
                 if propagator == "magnus":
                     # Each component needs its own oscillatory kernel. A beating
                     # field rotates at `delta_omega` *within* the step, so its
@@ -2558,12 +2556,23 @@ class Simulator:
                     )[None, :]
                     continue
 
+                H_rot = np.zeros((n, n), dtype=np.complex128)
+                for field_idx in static_field_indices:
+                    H_rot += coupling_scales[b, field_idx] * (
+                        upper_rot[field_idx] + lower_rot[field_idx]
+                    )
+                for field_idx, phases in beat_phases:
+                    phase = phases[b]
+                    H_rot += coupling_scales[b, field_idx] * (
+                        phase * upper_rot[field_idx]
+                        + phase.conjugate() * lower_rot[field_idx]
+                    )
                 H_rot.flat[diag_idx] += D
                 H_rot.flat[diag_idx] += D_mu_diag_batch[b]
 
                 if eigen_blocks is not None:
                     D_rot, V_rot, _ = _eigh_in_blocks(
-                        H_rot, _indices_for_block_labels(slow_labels), eig_backend
+                        H_rot, rotating_blocks, eig_backend
                     )
                 elif eig_backend == "zheevd":
                     D_rot, V_rot, info_rot = zheevd(H_rot)

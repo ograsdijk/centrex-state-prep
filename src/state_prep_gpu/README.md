@@ -37,6 +37,27 @@ for initial-state and monitor mapping. Simulators return final states and
 probabilities by default. Pass `store_every=1` to retain every state, or a
 larger positive stride for a downsampled history.
 
+Eigenvector tracking uses optimal one-to-one maximum-absolute-overlap assignment
+and phase alignment, matching the CPU objective. CUDA assignment runs on-device
+on PyTorch's current stream; it does not transfer an overlap matrix to SciPy.
+Its small kernel is compiled once per process/device/size/precision using the
+NVRTC library included in CUDA-enabled PyTorch. No standalone CUDA compiler is
+required. The CUDA assignment currently supports up to 512 states and finite
+float32/float64 costs. CPU tensor execution uses SciPy. Optimal ties in degenerate
+subspaces can have different valid permutations across backends.
+
+The shared-slow scan accepts `block_eigh="auto"` (default), `True`, or `False`.
+Automatic mode attempts exact blocks for batches of at least 250 points and uses
+dense solves below that size. This conservative threshold reflects the measured
+64-state SPA2 workload; it is not an autotuner for other dimensions/devices.
+`True` forces block detection; `False` forces dense solves. Detection unions all
+potentially active slow-Hamiltonian terms over the supplied field arrays,
+initial fields, and microwave matrices. Tiny nonzero couplings are retained;
+connected support falls back to dense solves. Sorted slow-basis sector indices
+are recomputed on-device at every step, rather than cached across crossings.
+
+See `PERFORMANCE_QUICKSTART.md` for concurrent CPU/GPU scans and checkpoints.
+
 ## Install PyTorch
 
 PyTorch is optional so CPU-only users can install and import the package without
@@ -58,7 +79,8 @@ metadata.
 - Synthetic propagation smoke check: `src/state_prep_gpu/example_smoke.py`
 - CPU comparison: `src/state_prep_gpu/example_compare_cpu.py`
 - CPU/GPU benchmark: `src/state_prep_gpu/benchmark_compare.py`
-- SPA2 microwave scan benchmark: `benchmarks/bench_gpu_torch_full_spa2.py`
+- Production SPA2 scan benchmark: `benchmarks/bench_gpu_spa2.py`
+- Paired GPU dense/block checks: `benchmarks/bench_performance_updates.py --device gpu`
 
 Run GPU examples with a CUDA-enabled PyTorch build. The SPA2 benchmark compares
 the PyTorch implementation against the CPU scan path.

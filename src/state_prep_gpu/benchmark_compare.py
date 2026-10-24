@@ -7,11 +7,9 @@ import numpy as np
 
 
 def _reorder_evecs_batched_np(V_in: np.ndarray, E_in: np.ndarray, V_ref: np.ndarray):
-    overlap = np.abs(np.conj(np.swapaxes(V_in, -2, -1)) @ V_ref)
-    best_j = np.argmax(overlap, axis=-1)
-    order = np.argsort(best_j, axis=-1, kind="stable")
-    V_out = np.take_along_axis(V_in, order[..., None, :], axis=-1)
-    E_out = np.take_along_axis(E_in, order, axis=-1)
+    from state_prep_gpu.example_compare_cpu import _reorder_evecs_batched_np as reorder
+
+    E_out, V_out = reorder(V_in, E_in, V_ref)
     return E_out, V_out
 
 
