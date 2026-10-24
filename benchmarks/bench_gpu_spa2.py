@@ -29,6 +29,7 @@ def run_cpu(
     detunings: np.ndarray,
     intensity_prefactors: np.ndarray,
     workers: int = 1,
+    forward_velocities: Optional[np.ndarray] = None,
 ):
     from state_prep.simulator import Simulator
 
@@ -49,6 +50,7 @@ def run_cpu(
         store_final_monitor_probabilities=True,
         progress=False,
         workers=workers,
+        forward_velocities=forward_velocities,
     )
 
 
@@ -61,6 +63,7 @@ def make_torch_runner(
     complex_dtype: str = "complex128",
     block_eigh: bool | str = "auto",
     slow_eigh_chunk_size: Optional[int] = None,
+    forward_velocities: Optional[np.ndarray] = None,
 ):
     """Prepare a full PyTorch GPU propagation runner for the SPA2 scan."""
     import centrex_tlf
@@ -142,6 +145,10 @@ def make_torch_runner(
         "B0": torch.as_tensor(b0[0], dtype=torch.float64, device=device),
         "monitor_state_vectors": torch.as_tensor(monitor_vectors, dtype=dtype, device=device),
     }
+    velocity_options = {} if forward_velocities is None else {
+        "forward_velocities": forward_velocities,
+        "reference_forward_velocity": float(trajectory.Vini[2]),
+    }
 
     def run(
         store_every: Optional[int] = None,
@@ -155,6 +162,7 @@ def make_torch_runner(
             profile_timings=profile_timings,
             block_eigh=block_eigh,
             slow_eigh_chunk_size=slow_eigh_chunk_size,
+            **velocity_options,
             **inputs,
         )
 
