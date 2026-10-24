@@ -154,7 +154,9 @@ def _eigh_in_blocks(
     labels = np.empty(n, dtype=np.int64)
     column = 0
     for block_id, indices in enumerate(blocks):
-        submatrix = np.ascontiguousarray(matrix[np.ix_(indices, indices)])
+        # Block indices are already integer arrays; avoid np.ix_'s repeated
+        # dtype checks in this per-scan-point hot path.
+        submatrix = np.ascontiguousarray(matrix[indices[:, None], indices])
         if eig_backend == "zheevd":
             block_values, block_vectors, info = zheevd(submatrix)
             if info != 0:
@@ -163,9 +165,9 @@ def _eigh_in_blocks(
             block_values, block_vectors = np.linalg.eigh(submatrix)
 
         width = len(indices)
-        columns = np.arange(column, column + width)
+        columns = slice(column, column + width)
         values[columns] = block_values
-        vectors[np.ix_(indices, columns)] = block_vectors
+        vectors[indices, columns] = block_vectors
         labels[columns] = block_id
         column += width
 

@@ -56,6 +56,20 @@ initial fields, and microwave matrices. Tiny nonzero couplings are retained;
 connected support falls back to dense solves. Sorted slow-basis sector indices
 are recomputed on-device at every step, rather than cached across crossings.
 
+The shared-slow scan also batches independent slow eigensolves across time in
+bounded tiles. `slow_eigh_chunk_size=None` (default) uses 128 timesteps on CUDA
+and one timestep on CPU tensors; pass a positive integer to choose a tile size,
+or `1` for the original per-step solver route. This works with dense transverse
+fields as well as exact blocks. State propagation, label tracking, monitor
+mapping, and history storage remain sequential and use the true initial fields.
+Only propagated samples are included, and the last tile may be shorter.
+
+At 64 states in complex128, 128 slow eigensystems occupy about 8.45 MB plus
+input matrices, labels, and solver workspace. Tile storage scales with the tile
+size and state dimension, rather than trajectory length. Each call builds its
+own tiles. With profiling enabled, `slow_eigh` includes tile construction and
+solve time amortized per covered timestep; other stages use the sampling stride.
+
 See `PERFORMANCE_QUICKSTART.md` for concurrent CPU/GPU scans and checkpoints.
 
 ## Install PyTorch
