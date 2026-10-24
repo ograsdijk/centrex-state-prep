@@ -4,13 +4,11 @@ import numpy as np
 
 
 def _reorder_evecs_batched_np(V_in: np.ndarray, E_in: np.ndarray, V_ref: np.ndarray):
-    # overlap[b, i, j] = | <v_in_i | v_ref_j> |
-    overlap = np.abs(np.conj(np.swapaxes(V_in, -2, -1)) @ V_ref)
-    best_j = np.argmax(overlap, axis=-1)  # (B, n)
-    order = np.argsort(best_j, axis=-1, kind="stable")  # (B, n)
+    from state_prep.utils import reorder_evecs
 
-    V_out = np.take_along_axis(V_in, order[..., None, :], axis=-1)
-    E_out = np.take_along_axis(E_in, order, axis=-1)
+    E_out, V_out = np.empty_like(E_in), np.empty_like(V_in)
+    for b in range(len(V_in)):
+        E_out[b], V_out[b] = reorder_evecs(V_in[b], E_in[b], V_ref[b])
     return E_out, V_out
 
 

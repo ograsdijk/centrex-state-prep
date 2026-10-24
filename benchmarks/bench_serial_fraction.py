@@ -39,7 +39,9 @@ from common import (
     write_results,
 )
 from state_prep import Simulator, scan_grid
-from state_prep.simulator import LabelGapTracker, _sample_offset
+from state_prep.simulator import (
+    LabelGapTracker, _sample_offset, _eigh_in_blocks, _indices_for_block_labels,
+)
 from state_prep.utils import find_max_overlap_idx, reorder_evecs
 
 SHIPPED = Simulator._time_evolve_mu_batched_shared_slow
@@ -66,6 +68,7 @@ def make_instrumented(timings: dict[str, float]):
         self, *, H_slow_t, muw_hams, coupling_scales, D_mu_diag_batch, t_array,
         monitor_states, store_final_probabilities, store_final_monitor_probabilities,
         progress, eig_backend, time_sampling="mid", propagator="frozen",
+        eigen_blocks=None,
     ):
         # Refuse rather than silently ignore. This loop implements only the
         # frozen path; accepting `magnus` here would report the frozen split
@@ -84,7 +87,10 @@ def make_instrumented(timings: dict[str, float]):
         n = int(H_tini.shape[0])
         diag_idx = slice(None, None, n + 1)
 
-        E_ref, V_ref = np.linalg.eigh(H_tini)
+        if eigen_blocks is None:
+            E_ref, V_ref = np.linalg.eigh(H_tini)
+        else:
+            E_ref, V_ref, _ = _eigh_in_blocks(H_tini, eigen_blocks, eig_backend)
         V_ref = V_ref[:, np.argsort(E_ref)]
         V_ref_ini = V_ref
 
@@ -117,7 +123,12 @@ def make_instrumented(timings: dict[str, float]):
             t0 = time.perf_counter()
             H_slow_i = H_slow_t(t_sample)
             t1 = time.perf_counter()
-            D, V = eig(H_slow_i)
+            if eigen_blocks is None:
+                D, V = eig(H_slow_i)
+                rotating_blocks = None
+            else:
+                D, V, labels = _eigh_in_blocks(H_slow_i, eigen_blocks, eig_backend)
+                rotating_blocks = _indices_for_block_labels(labels)
             t2 = time.perf_counter()
             Es, evecs = reorder_evecs(V, D, V_ref)
             last_evecs = evecs
@@ -138,7 +149,10 @@ def make_instrumented(timings: dict[str, float]):
                 H_rot.flat[diag_idx] += D
                 H_rot.flat[diag_idx] += D_mu_diag_batch[b]
 
-                D_rot, V_rot = eig(H_rot)
+                if rotating_blocks is None:
+                    D_rot, V_rot = eig(H_rot)
+                else:
+                    D_rot, V_rot, _ = _eigh_in_blocks(H_rot, rotating_blocks, eig_backend)
                 ph = np.exp(-1j * D_rot * dt)
                 tmp = psis_slow[b] @ V_rot.conj()
                 tmp *= ph[np.newaxis, :]
@@ -164,6 +178,7 @@ def make_instrumented(timings: dict[str, float]):
         mon = None
         if store_final_monitor_probabilities and monitor_idx is not None:
             mon = np.abs(psis_batch @ last_evecs[:, monitor_idx].conj()) ** 2
+        self._label_gaps = gap_tracker.summary(self.trajectory.get_T())
         return psis_batch, probs, mon, V_ref_ini, V_ref
 
     return impl

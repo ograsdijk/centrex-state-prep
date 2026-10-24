@@ -1,5 +1,111 @@
 # Performance Benchmark Results
 
+## Local CPU/GPU updates (2026-10-24)
+
+Measured on Windows with an AMD Ryzen 7 9800X3D (8 cores/16 threads), NVIDIA
+RTX 5070 Ti, Python 3.11.13, NumPy 2.3.2, SciPy 1.17.1, and PyTorch
+2.12.1+cu132. All tables below use one warmup and five interleaved timed rounds;
+spreads are sample standard deviations. Other desktop workloads were active,
+so small changes are treated conservatively. Commands and operational details
+are in `PERFORMANCE_QUICKSTART.md`.
+
+### CPU local changes
+
+Compared revision `315af72` with the local candidate in the same interpreter,
+using one worker, pinned BLAS, four initial states, exact blocks, final-only
+output, and the real SPA2 fields. Magnus cases add the RC background at
+-7.4 MHz. Both paths returned identical final probabilities in every case.
+The changes hoist block grouping out of the point loop and omit unused frozen
+assembly in multitone Magnus.
+
+| Steps | Points | Propagator | Original mean ± std | Candidate mean ± std | Assessment |
+|---:|---:|---|---:|---:|---|
+| 500 | 5 | frozen | 0.793 ± 0.077 s | 0.737 ± 0.044 s | Unproven |
+| 500 | 25 | frozen | 3.050 ± 0.066 s | 2.796 ± 0.062 s | 1.091x faster |
+| 1000 | 5 | frozen | 1.782 ± 0.220 s | 1.746 ± 0.246 s | Unproven |
+| 1000 | 25 | frozen | 4.707 ± 0.159 s | 4.282 ± 0.067 s | 1.099x faster |
+| 500 | 5 | Magnus | 1.307 ± 0.155 s | 1.246 ± 0.085 s | Unproven |
+| 500 | 25 | Magnus | 3.606 ± 0.413 s | 3.387 ± 0.415 s | Unproven |
+| 1000 | 5 | Magnus | 2.784 ± 0.047 s | 2.675 ± 0.037 s | 1.041x faster |
+| 1000 | 25 | Magnus | 7.832 ± 0.594 s | 7.187 ± 0.436 s | Unproven by combined-spread rule* |
+
+*The paired confidence interval excludes zero, but the difference is smaller
+than the summed standard deviations. Do not promote the nominal 1.09x ratio
+to a robust speedup for this Magnus case.
+
+Raw report: `results/cpu_performance_updates.json`.
+
+### Production GPU exact blocks, with optimal assignment
+
+Both variants use the corrected one-to-one matching and complex phase
+alignment; these are not comparisons against the old greedy tracker. Runner
+input preparation is excluded, while automatic block discovery inside each
+simulation is included. All cases use four initial states and final-only output.
+
+| Steps | Points | Dense mean ± std | Blocks mean ± std | Result |
+|---:|---:|---:|---:|---|
+| 500 | 25 | 3.435 ± 0.200 s | 4.756 ± 0.492 s | Blocks 38.5% slower |
+| 1000 | 25 | 6.675 ± 0.076 s | 9.156 ± 0.593 s | Blocks 37.2% slower |
+| 500 | 250 | 8.895 ± 0.249 s | 5.323 ± 0.188 s | Blocks 1.671x faster |
+| 1000 | 250 | 17.802 ± 0.168 s | 11.190 ± 0.403 s | Blocks 1.591x faster |
+
+Maximum dense/block probability difference was `1.495e-6`. Against the CPU
+reference, the block GPU results differed by at most `5.77e-9` in probabilities
+and `3.18e-13` in absolute deviation of state fidelity from one. Blocks are
+therefore enabled automatically only at batches of at least 250; smaller batches
+remain dense unless explicitly forced. This threshold is a conservative policy
+for the measured 64-state SPA2 workload, not a universal crossover estimate.
+
+Raw report: `results/gpu_performance_updates.json`.
+
+### Device assignment versus SciPy round-trips
+
+At 500 steps and 25 points, using dense production GPU propagation and optimal
+matching in both variants:
+
+| Assignment | Mean ± std |
+|---|---:|
+| On-device CUDA, float64 costs | 3.261 ± 0.029 s |
+| SciPy with device/host/device transfers | 3.337 ± 0.119 s |
+
+Final probabilities matched exactly. The paired 95% interval for CUDA minus
+SciPy was `[-0.254, +0.101] s`, so a runtime difference is **unproven**. These
+measurements do not support claiming that the transfers dominate this workload.
+Production uses the device implementation, including full optimal conflict
+resolution and phase alignment; there is no per-step CPU fallback.
+
+Raw report: `results/gpu_assignment.json`.
+
+### Concurrent CPU/GPU throughput
+
+At 1,000 steps, 1,000 detunings, four initial states, uniform midpoint frozen
+propagation, and final-only storage, fresh processes ran each variant with all
+startup, preparation, checkpoint writing, merging, and shutdown included.
+The hybrid assigned the first 600 scan points to six CPU workers and the
+remaining 400 to the GPU (automatic exact blocks). GPU PyTorch CPU threads were
+limited to one. One warmup and five interleaved repeats gave:
+
+| Execution | End-to-end mean ± std |
+|---|---:|
+| CPU only, eight workers | 36.956 ± 3.257 s |
+| CPU only, six workers | 42.507 ± 0.862 s |
+| Six CPU workers + GPU, 60/40 point split | 31.314 ± 1.735 s |
+
+Compared with the faster tested CPU-only setting, concurrent execution was
+**1.180x faster (15.3% less wall time)**. The paired runtime difference was
+`-5.642 ± 1.436 s` (standard error), with 95% interval `[-9.629, -1.656] s`.
+Every timed round favored concurrent execution, and the mean difference also
+exceeded the summed standard deviations. Maximum final-probability difference
+was `4.569e-9`, after projecting physical states into the common CPU readout basis.
+
+This establishes a useful concurrent setting for this workload; it does not
+establish a globally optimal worker count or split. The GPU finished its chunk
+before the CPU in the warmup, so a more GPU-heavy split may improve balance but
+has not been timed with repeats. Smaller jobs may lose to process startup.
+
+Raw summary and per-round timings: `results/concurrent_comparison/comparison.json`.
+Individual backend checkpoints also record preparation and propagation times.
+
 > **Historical results in the sections below are single-shot.** The repeated
 > SPA2 comparison recorded later in this document is newer; read
 > `IMPROVEMENTS.md` for other re-measured figures.

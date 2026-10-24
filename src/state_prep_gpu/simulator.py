@@ -456,6 +456,7 @@ def simulate_batched_scalar_microwaves_shared_slow(
     store_every: Optional[int] = None,
     profile_timings: Optional[dict[str, list[float]]] = None,
     profile_step_stride: int = 25,
+    block_eigh: bool | str = "auto",
 ) -> BatchedSimulationOutput:
     """GPU time evolution for microwave scans with a *shared* slow Hamiltonian.
 
@@ -478,6 +479,9 @@ def simulate_batched_scalar_microwaves_shared_slow(
     - profile_timings: optional dict populated with sampled CUDA-event timings
       for propagation stages. Profiling synchronizes once at the end.
     - profile_step_stride: sample one step every this many propagation steps.
+    - block_eigh: "auto" uses exact blocks for batches of at least 250 points;
+      smaller batches use dense solves to avoid small-solver launch overhead.
+      True forces detection at any batch size; False forces dense solves.
     """
 
     torch = get_torch()
@@ -530,7 +534,18 @@ def simulate_batched_scalar_microwaves_shared_slow(
     if E_initial.shape != (3,) or B_initial.shape != (3,):
         raise ValueError("E0 and B0 must each have shape (3,) for shared-slow evolution")
     H0 = slow_hamiltonian_batch(terms, E_initial, B_initial)  # (n,n)
-    _, V0 = torch.linalg.eigh(H0)
+    from ._blocks import shared_slow_blocks, eigh_in_blocks, rotating_frame_blocks
+
+    if block_eigh not in (True, False, "auto"):
+        raise ValueError("block_eigh must be True, False or 'auto'")
+    use_blocks = batch >= 250 if block_eigh == "auto" else block_eigh
+    blocks = shared_slow_blocks(
+        terms, E_t, B_t, E_initial, B_initial, H_mu_base_fields
+    ) if use_blocks else None
+    if blocks is None:
+        _, V0 = torch.linalg.eigh(H0)
+    else:
+        _, V0, _ = eigh_in_blocks(H0, blocks)
     V_ref = V0
     V_ref_ini = V0
 
@@ -561,7 +576,10 @@ def simulate_batched_scalar_microwaves_shared_slow(
         if profile_this_step:
             slow_start, slow_end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
             slow_start.record()
-        D, V = torch.linalg.eigh(H_slow)
+        if blocks is None:
+            D, V = torch.linalg.eigh(H_slow)
+        else:
+            D, V, slow_labels = eigh_in_blocks(H_slow, blocks)
         if profile_this_step:
             slow_end.record()
             profile_events.setdefault("slow_eigh", []).append((slow_start, slow_end))
@@ -601,7 +619,12 @@ def simulate_batched_scalar_microwaves_shared_slow(
         if profile_this_step:
             rot_start, rot_end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
             rot_start.record()
-        D_rot, V_rot = torch.linalg.eigh(H_rot)
+        if blocks is None:
+            D_rot, V_rot = torch.linalg.eigh(H_rot)
+        else:
+            D_rot, V_rot, _ = eigh_in_blocks(
+                H_rot, rotating_frame_blocks(slow_labels, blocks)
+            )
         if profile_this_step:
             rot_end.record()
             profile_events.setdefault("batched_rotating_eigh", []).append((rot_start, rot_end))
