@@ -1,5 +1,69 @@
 # Performance Benchmark Results
 
+## Shared spatial-grid velocity scans (2026-10-24)
+
+CPU `run_microwave_scan` and the GPU shared-slow scalar-envelope kernel now
+accept per-point forward velocities. They sample a common spatial path and
+scale each timestep by reference speed / speed. Identical microwave parameter
+rows share the full frozen-Hamiltonian eigensolve, as well as the slow solve.
+Distinct powers/detunings retain separate full solves. GPU grouping also checks
+the complete per-point envelope and preserves the precision of shift inputs.
+The CPU multitone route shares only slow solves and evaluates beat phases at
+each point's physical elapsed time, including Magnus kernels when selected.
+The scalar GPU route's existing lack of same-manifold beat support is unchanged.
+
+One warmup and five interleaved repeats compared eight independent velocity
+runs against one ensemble: five detuning combinations × eight speeds from
+140 to 240 m/s, four initial states, 300 spatial samples, 64 states, complex128,
+and the varying-E dense-Hamiltonian setup. Exact blocks were disabled on both
+sides. CPU used one worker with one BLAS thread; GPU used one PyTorch CPU
+thread. Environment: Ryzen 7 9800X3D / RTX 5070 Ti, Python 3.11.13,
+NumPy 2.3.2, SciPy 1.17.1, PyTorch 2.12.1+cu132.
+
+| Backend | Separate velocity runs, mean ± std | Shared ensemble, mean ± std | Speedup | Runtime reduction |
+| --- | ---: | ---: | ---: | ---: |
+| CPU | 6.588 ± 0.039 s | 1.057 ± 0.017 s | 6.23× | 83.9% |
+| GPU | 6.954 ± 0.125 s | 0.880 ± 0.005 s | 7.90× | 87.3% |
+
+Paired 95% intervals for ensemble minus independent runtime were
+[-5.578, -5.484] s (CPU) and [-6.231, -5.918] s (GPU); both mean improvements
+exceeded the summed baseline/candidate standard deviations. CPU setup objects
+and GPU input preparation were outside timings. CPU scan preparation inside
+`run_microwave_scan`, per-call GPU grouping, propagation, and output assembly
+were included. GPU timings synchronized completion. These are ensemble
+throughput gains relative to separate velocity runs, not gains for a single
+velocity or for scans whose full Hamiltonians differ between velocities.
+
+Common-basis final probability differences against independent trajectories
+were at most 5.55e-9 on CPU and zero on GPU; CPU versus GPU differed by
+1.09e-8. The GPU baseline used the existing per-point timestep capability
+with one velocity per call. The CPU baseline used separately scaled physical
+trajectories. The shared and separate runs used the same spatial samples;
+this timing comparison does not establish timestep convergence at 300 samples.
+
+Reproduce with a fresh output file:
+
+```powershell
+$env:PYTHONPATH = "$PWD\src"
+& $python benchmarks/bench_velocity_scan.py --n-steps 300 --velocities 8 --parameter-points 5 --warmup 1 --repeat 5 --output results/velocity_scan_new.json
+```
+
+Raw repeated timings are retained in ignored
+`results/velocity_scan_20261024.json`. Regression tests compare separate
+trajectories, frozen/Magnus propagation, multitone beat times, exact blocks,
+CPU/CUDA tensor execution, histories/monitors, differing envelopes, grouping
+precision, and parallel-worker ordering. Velocity arrays are also accepted by
+the CPU/GPU launcher's parameter file and included in checkpoint fingerprints.
+
+Validation completed with the full suite (233 passed), then 68 focused
+CPU/CUDA tests after adding shift-key precision and transverse-path coverage.
+The standard CPU/GPU comparison retained a maximum state difference of
+1.95e-15. A mixed CPU/GPU launcher smoke run with two CPU workers agreed with
+a CPU reference within 2.61e-9, retained velocity/time metadata, resumed matching
+checkpoints, and rejected changed velocities without overwriting prior inputs.
+The historical-baseline GPU tile benchmark also passed a functional smoke
+check after the runner API extension; its single-run timing is not a speed claim.
+
 ## Production GPU slow-eigensolve tiles (2026-10-24)
 
 The shared-slow GPU scan now batches independent slow eigensolves across

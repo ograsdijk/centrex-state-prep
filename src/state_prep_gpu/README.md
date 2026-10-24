@@ -72,6 +72,30 @@ solve time amortized per covered timestep; other stages use the sampling stride.
 
 See `PERFORMANCE_QUICKSTART.md` for concurrent CPU/GPU scans and checkpoints.
 
+### Forward-velocity ensembles
+
+`simulate_batched_scalar_microwaves_shared_slow` accepts `forward_velocities`
+(positive scalar or `(B,)`, in m/s) and `reference_forward_velocity` (m/s).
+Supply `E_t`, `B_t`, and microwave envelopes on one common spatial path;
+`dt` describes traversal at the reference speed. The function scales each
+point's timesteps by `reference_forward_velocity / forward_velocities`.
+Its output batch order and storage shapes are unchanged.
+
+For example, with the usual arrays prepared for a reference speed of 184 m/s,
+pass `forward_velocities=[150., 184., 230.]` and
+`reference_forward_velocity=184.` along with three rows of initial states,
+coupling scales and rotating-frame shifts. Identical microwave parameters
+share the full eigensolve across these speeds. Rows with different detunings,
+powers, or complete per-point envelopes retain distinct solves. Grouping
+compares exact inputs once per call; it does not cache results across calls.
+
+Keep trajectory direction fixed when sampling the common path: changing only
+the forward component while retaining transverse speed would change the path.
+This scalar-envelope GPU route does not support same-manifold carrier beats;
+the existing scan launcher rejects those setups. The CPU multitone route does
+support them, with per-velocity beat phases and separate full eigensolves.
+No Doppler correction is inferred from the supplied speeds.
+
 ## Install PyTorch
 
 PyTorch is optional so CPU-only users can install and import the package without

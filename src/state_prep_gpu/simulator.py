@@ -459,6 +459,8 @@ def simulate_batched_scalar_microwaves_shared_slow(
     profile_step_stride: int = 25,
     block_eigh: bool | str = "auto",
     slow_eigh_chunk_size: Optional[int] = None,
+    forward_velocities: Optional[Any] = None,
+    reference_forward_velocity: Optional[float] = None,
 ) -> BatchedSimulationOutput:
     """GPU time evolution for microwave scans with a *shared* slow Hamiltonian.
 
@@ -491,6 +493,13 @@ def simulate_batched_scalar_microwaves_shared_slow(
       together across time. None uses 128 on CUDA and 1 on CPU tensors; 1
       selects the original per-step solve. Tracking and propagation remain
       sequential. Only the current tile is retained, with no cross-call cache.
+    - forward_velocities: optional positive scalar or (B,) forward speeds in
+      m/s. E_t/B_t and amp_t must sample one common spatial path. dt describes
+      the reference_forward_velocity and is scaled by reference speed / speed.
+      The caller must preserve the spatial path, including transverse slope.
+      Identical coupling, shift and complete envelope rows share a microwave
+      eigensolve; different per-point envelopes retain separate solves. This
+      scalar-envelope API does not model same-manifold carrier beat phases.
     """
 
     torch = get_torch()
@@ -531,6 +540,20 @@ def simulate_batched_scalar_microwaves_shared_slow(
         raise ValueError("E_t/B_t must have T>=2")
 
     dt_arr = _normalize_dt(torch, dt, T, batch, psi.device)
+    if forward_velocities is not None:
+        velocities = torch.as_tensor(forward_velocities, dtype=torch.float64, device=psi.device)
+        if velocities.ndim > 1 or velocities.numel() not in (1, batch):
+            raise ValueError("forward_velocities must be scalar or have shape (B,)")
+        if not bool(torch.all(torch.isfinite(velocities) & (velocities > 0))):
+            raise ValueError("forward_velocities must be finite and positive")
+        reference = torch.as_tensor(reference_forward_velocity if reference_forward_velocity is not None else float('nan'),
+                                    dtype=torch.float64, device=psi.device)
+        if reference.ndim != 0 or not bool(torch.isfinite(reference) & (reference > 0)):
+            raise ValueError("reference_forward_velocity must be finite and positive for velocity scans")
+        scales = reference / velocities.reshape(-1).expand(batch)
+        dt_arr = (dt_arr[:, None] if dt_arr.ndim == 1 else dt_arr) * scales[None, :]
+    elif reference_forward_velocity is not None:
+        raise ValueError("reference_forward_velocity requires forward_velocities")
 
     H_mu_base_fields = _as_torch_complex(H_mu_base_fields, dtype=terms.Hff.dtype, device=terms.Hff.device)
     if H_mu_base_fields.ndim != 3 or H_mu_base_fields.shape[1] != n or H_mu_base_fields.shape[2] != n:
@@ -548,6 +571,23 @@ def simulate_batched_scalar_microwaves_shared_slow(
     D_mu_diag_batch = torch.as_tensor(D_mu_diag_batch, device=psi.device)
     if D_mu_diag_batch.shape != (batch, n):
         raise ValueError("D_mu_diag_batch must have shape (B,n)")
+
+    solve_indices = solve_inverse = None
+    if forward_velocities is not None:
+        # Group exact inputs once, including the entire per-point envelope.
+        # Never infer equivalence just from detuning/power when envelopes differ.
+        shift_features = (torch.view_as_real(D_mu_diag_batch.resolve_conj()).flatten(1)
+                          if torch.is_complex(D_mu_diag_batch) else D_mu_diag_batch)
+        features = [coupling_scales, shift_features]
+        if amp_t.ndim == 3:
+            features.append(torch.view_as_real(amp_t.transpose(0, 1).contiguous()).flatten(1))
+        unique, inverse = torch.unique(torch.cat(features, dim=1), dim=0, return_inverse=True)
+        group_count = int(unique.shape[0])
+        if group_count < batch:
+            solve_indices = torch.full((group_count,), batch, dtype=torch.int64, device=psi.device)
+            solve_indices.scatter_reduce_(0, inverse, torch.arange(batch, device=psi.device), reduce="amin")
+            solve_inverse = inverse
+        del features, shift_features, unique, inverse
 
     # Initial slow Hamiltonian and reference eigenvectors (for adiabatic tracking)
     E_initial = E_t[0] if E0 is None else torch.as_tensor(E0, device=psi.device)
@@ -643,6 +683,8 @@ def simulate_batched_scalar_microwaves_shared_slow(
         amp_i = amp_t[i][None, :] if amp_t.ndim == 2 else amp_t[i]
         weights = coupling_scales * amp_i
         weights = _as_torch_complex(weights, dtype=terms.Hff.dtype, device=terms.Hff.device)
+        if solve_indices is not None:
+            weights = weights[solve_indices]
 
         # V is shared across scan points. Rotate each microwave field once,
         # then combine the rotated fields per point. Rotating a combined
@@ -655,7 +697,9 @@ def simulate_batched_scalar_microwaves_shared_slow(
         )  # (M,n,n)
         H_rot = torch.tensordot(weights, H_mu_rot_fields, dims=([1], [0]))  # (B,n,n)
         H_rot[:, diag_idx, diag_idx] += D
-        H_rot[:, diag_idx, diag_idx] += D_mu_diag_batch
+        H_rot[:, diag_idx, diag_idx] += (
+            D_mu_diag_batch if solve_indices is None else D_mu_diag_batch[solve_indices]
+        )
         if profile_this_step:
             assemble_end.record()
             profile_events.setdefault("microwave_rotate_and_assemble", []).append((assemble_start, assemble_end))
@@ -669,6 +713,8 @@ def simulate_batched_scalar_microwaves_shared_slow(
             D_rot, V_rot, _ = eigh_in_blocks(
                 H_rot, rotating_frame_blocks(slow_labels, blocks)
             )
+        if solve_inverse is not None:
+            D_rot, V_rot = D_rot[solve_inverse], V_rot[solve_inverse]
         if profile_this_step:
             rot_end.record()
             profile_events.setdefault("batched_rotating_eigh", []).append((rot_start, rot_end))

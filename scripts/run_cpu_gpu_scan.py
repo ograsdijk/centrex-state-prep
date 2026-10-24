@@ -47,12 +47,14 @@ def _worker(backend, indices, config, fingerprint, output, setup_path):
         setup = dill.load(stream)
     with np.load(output / "parameters.npz", allow_pickle=False) as params:
         det, power = params["detunings_hz"][indices], params["intensity_prefactors"][indices]
+        velocities = params["forward_velocities"][indices] if "forward_velocities" in params else None
     setup["initial_states"] = setup["initial_states"][:config["initial_states"]]
     if backend == "cpu":
         preparation = time.perf_counter() - started
         propagation_started = time.perf_counter()
         result = run_cpu(setup, n_steps=config["steps"], detunings=det,
-                         intensity_prefactors=power, workers=config["workers"])
+                         intensity_prefactors=power, workers=config["workers"],
+                         forward_velocities=velocities)
         propagation = time.perf_counter() - propagation_started
         # A spawned outer worker must close its reusable loky children before
         # multiprocessing's exit handler tries to join them on Windows.
@@ -84,7 +86,8 @@ def _worker(backend, indices, config, fingerprint, output, setup_path):
                 actual = ham(float(t))
                 if not np.allclose(actual, amp[i, j] * base[j], atol=1e-10, rtol=1e-12):
                     raise ValueError("GPU scalar envelope does not reproduce this microwave field")
-        run, sync = make_torch_runner(setup, n_steps=config["steps"], detunings=det, intensity_prefactors=power)
+        run, sync = make_torch_runner(setup, n_steps=config["steps"], detunings=det,
+                                     intensity_prefactors=power, forward_velocities=velocities)
         sync()
         preparation = time.perf_counter() - started
         propagation_started = time.perf_counter()
@@ -137,7 +140,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--setup-file", type=Path)
-    parser.add_argument("--parameters", type=Path, help="NPZ: detunings_hz and intensity_prefactors, both (B,M)")
+    parser.add_argument("--parameters", type=Path, help="NPZ: detunings_hz/intensity_prefactors (B,M), optional forward_velocities (B,) in m/s")
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--batch", type=int, default=250)
     parser.add_argument("--initial-states", type=int, default=4)
@@ -157,9 +160,12 @@ def main():
         setup = dill.load(stream)
     if args.initial_states > len(setup["initial_states"]):
         parser.error("requested more initial states than setup provides")
+    velocities = None
     if args.parameters:
         with np.load(args.parameters, allow_pickle=False) as params:
             det, power = params["detunings_hz"], params["intensity_prefactors"]
+            if "forward_velocities" in params:
+                velocities = np.asarray(params["forward_velocities"], dtype=float)
     else:
         from state_prep import scan_grid
         det, power = scan_grid(n_fields=len(setup["microwave_fields"]), detunings_hz=np.linspace(-2e6, 1e6, args.batch))
@@ -168,11 +174,20 @@ def main():
     if not np.isfinite(det).all() or not np.isfinite(power).all() or (power < 0).any():
         parser.error("parameters must be finite, with nonnegative intensity prefactors")
     batch = len(det)
+    if velocities is not None:
+        if velocities.shape != (batch,) or not np.isfinite(velocities).all() or (velocities <= 0).any():
+            parser.error("forward_velocities must have shape (B,) with finite positive speeds in m/s")
+        reference_speed = float(setup['trajectory'].Vini[2])
+        if not np.isfinite(reference_speed) or reference_speed <= 0:
+            parser.error("velocity scans require a finite positive reference forward velocity")
     config = dict(steps=args.steps, workers=args.workers, initial_states=args.initial_states,
                   cpu_points=round(batch * args.cpu_fraction), batch=batch)
     digest = hashlib.sha256(json.dumps(config, sort_keys=True).encode())
     for data in (setup_path.read_bytes(), det.tobytes(), power.tobytes()):
         digest.update(data)
+    if velocities is not None:
+        digest.update(b'forward_velocities')
+        digest.update(velocities.tobytes())
     for path in sorted((ROOT / "src").rglob("*.py")) + [Path(__file__), ROOT / "benchmarks" / "bench_gpu_spa2.py", ROOT / "benchmarks" / "common.py"]:
         digest.update(path.relative_to(ROOT).as_posix().encode())
         digest.update(path.read_bytes())
@@ -182,7 +197,8 @@ def main():
     if manifest.exists() and json.loads(manifest.read_text()) != request:
         raise ValueError("Output directory contains a different request; choose a new directory")
     manifest.write_text(json.dumps(request, indent=2) + "\n")
-    _save(output / "parameters.npz", detunings_hz=det, intensity_prefactors=power)
+    velocity_arrays = {} if velocities is None else dict(forward_velocities=velocities)
+    _save(output / "parameters.npz", detunings_hz=det, intensity_prefactors=power, **velocity_arrays)
     tasks = [("cpu", np.arange(config["cpu_points"])), ("gpu", np.arange(config["cpu_points"], batch))]
     tasks = [(backend, indices) for backend, indices in tasks if len(indices)]
     started = time.perf_counter()
@@ -190,6 +206,9 @@ def main():
         futures = [pool.submit(_worker, backend, indices, config, fingerprint, str(output), str(setup_path)) for backend, indices in tasks]
         paths = [future.result() for future in futures]
     merged = merge_checkpoints(paths, batch, fingerprint)
+    if velocities is not None:
+        merged.update(velocity_arrays, reference_forward_velocity=reference_speed,
+                      reference_t_array=np.linspace(0, setup['trajectory'].get_T(), args.steps))
     monitors = setup.get("monitor_states")
     if monitors:
         vectors = np.stack([s.state_vector(setup["hamiltonian"].QN) for s in monitors])

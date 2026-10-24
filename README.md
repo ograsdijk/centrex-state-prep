@@ -67,6 +67,42 @@ result = simulator.run(N_steps=10_000)
 
 ## Parameter scans
 
+Forward-velocity scans can share the same spatial samples and eigensolves:
+
+```python
+velocities = np.linspace(140.0, 240.0, 25)  # m/s
+result = simulator.run_microwave_scan(
+    detunings_hz=np.zeros((1, len(simulator.microwave_fields))),
+    intensity_prefactors=np.ones((1, len(simulator.microwave_fields))),
+    forward_velocities=velocities,
+    N_steps=10000,
+)
+```
+
+A single microwave parameter row broadcasts over the velocities. With multiple
+rows, each velocity pairs with its corresponding detuning/power row; use
+`np.repeat`/`np.tile` to form a Cartesian grid. Uniform sampling fixes spatial
+step size, with each point's timestep scaled by reference forward speed divided
+by its speed. The whole velocity vector scales to preserve the reference path's
+transverse slope. This models speed variation along one path, not a change in
+beam angle. `result.t_array` uses reference-trajectory time;
+`result.times_per_point` has shape `(B, T)` and contains physical times.
+
+Frozen microwave eigensolves are reused for identical detuning/power rows.
+The CPU's optional multitone path still shares slow eigensolves, but evaluates
+beat phases at each velocity's elapsed time and retains separate full solves.
+No speed-dependent detuning or Doppler correction is added automatically.
+With `workers>1`, sharing is within each worker's chunk; each chunk repeats the
+shared solves, so worker count should be benchmarked for a velocity ensemble.
+
+The CPU/GPU launcher also accepts an optional `forward_velocities` array `(B,)`
+in its `--parameters` NPZ file, alongside `(B,M)` detunings and intensity
+prefactors. The merged output retains the speeds, `reference_forward_velocity`,
+and `reference_t_array`; multiply that time array by reference speed / speed
+to recover physical times. Checkpoints include the velocity array in their
+fingerprint. The launcher's existing restriction against same-manifold beats
+on the GPU still applies.
+
 For scans where the trajectory, fields and slow Hamiltonian are shared across
 scan points and only the microwave parameters vary, use
 `Simulator.run_microwave_scan` rather than looping over `run`. It reuses a

@@ -11,6 +11,60 @@ DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
 TILE_SINGLE_PRECISION_TOL = 4e-5
 
 
+@pytest.mark.parametrize('device', DEVICES)
+@pytest.mark.parametrize('dtype', [torch.complex64, torch.complex128])
+@pytest.mark.parametrize('block_eigh', [False, True])
+@pytest.mark.parametrize('different_envelope', [False, True])
+def test_velocity_groups_match_independent_solves(device, dtype, block_eigh, different_envelope, monkeypatch):
+    opts = options(device, dtype, dense=False)
+    opts['block_eigh'] = block_eigh
+    for key in ('coupling_scales', 'D_mu_diag_batch'):
+        opts[key][2] = opts[key][0]
+    if different_envelope:
+        opts['amp_t'][70:, 2, 0] = 0.3
+    speeds = torch.tensor([150., 184., 230.], dtype=torch.float64, device=device)
+    reference = simulate(**dict(opts, dt=opts['dt'] * (184. / speeds)[None, :].expand(136, 3)))
+    original = torch.linalg.eigh
+    batches = []
+    def record(matrix, *args, **kwargs):
+        if matrix.ndim == 3:
+            batches.append(matrix.shape[0])
+        return original(matrix, *args, **kwargs)
+    monkeypatch.setattr(torch.linalg, 'eigh', record)
+    actual = simulate(**opts, forward_velocities=speeds, reference_forward_velocity=184.,
+                      slow_eigh_chunk_size=1)
+    assert_outputs(actual, reference, TILE_SINGLE_PRECISION_TOL if dtype == torch.complex64 else 1e-11)
+    if not block_eigh:
+        assert batches == [3 if different_envelope else 2] * 136
+
+
+@pytest.mark.parametrize('velocities,reference', [([0., 184., 200.], 184.),
+    ([float('nan')], 184.), ([[184.]], 184.), ([184., 200.], 184.),
+    ([184.], None), ([184.], 0.), ([184.], float('inf'))])
+def test_gpu_velocity_validation(velocities, reference):
+    with pytest.raises(ValueError, match='velocity|velocities'):
+        simulate(**options('cpu'), forward_velocities=velocities, reference_forward_velocity=reference)
+
+
+@pytest.mark.parametrize('device', DEVICES)
+def test_velocity_group_keys_preserve_shift_precision(device, monkeypatch):
+    opts = options(device, torch.complex64)
+    opts['block_eigh'] = False
+    opts['coupling_scales'][:] = 1
+    opts['D_mu_diag_batch'] = torch.ones((3, 8), dtype=torch.float64, device=device)
+    opts['D_mu_diag_batch'][2, 0] += 1e-9  # Distinct even if a float32 key would round it away.
+    original = torch.linalg.eigh
+    batches = []
+    def record(matrix, *args, **kwargs):
+        if matrix.ndim == 3:
+            batches.append(matrix.shape[0])
+        return original(matrix, *args, **kwargs)
+    monkeypatch.setattr(torch.linalg, 'eigh', record)
+    simulate(**opts, forward_velocities=[150., 184., 230.], reference_forward_velocity=184.,
+             slow_eigh_chunk_size=1)
+    assert batches == [2] * 136
+
+
 def options(device, dtype=torch.complex128, *, dense=True, steps=137):
     rng = np.random.default_rng(14)
     n, batch = 8, 3

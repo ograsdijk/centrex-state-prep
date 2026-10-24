@@ -1070,6 +1070,15 @@ class MicrowaveScanResult:
     time_sampling: str = "mid"
     # Always one of `PROPAGATORS`.
     propagator: str = "frozen"
+    forward_velocities: Optional[np.ndarray] = None
+
+    @property
+    def times_per_point(self) -> np.ndarray:
+        """Physical times (B,T); t_array itself uses the reference trajectory."""
+        scales = np.ones(self.batch_size) if self.forward_velocities is None else (
+            self.trajectory.Vini[2] / self.forward_velocities
+        )
+        return scales[:, None] * self.t_array[None, :]
 
     @property
     def batch_size(self) -> int:
@@ -1726,6 +1735,7 @@ class Simulator:
         time_sampling: str = "mid",
         propagator: str = "frozen",
         block_eigh: bool = True,
+        forward_velocities: Optional[np.ndarray] = None,
     ) -> MicrowaveScanResult:
         """Run a batched microwave scan reusing the slow diagonalization.
 
@@ -1743,6 +1753,19 @@ class Simulator:
         - For M microwave fields, provide arrays shaped (B, M) for batch size B.
         - For M=1, 1D arrays of shape (B,) or scalars are accepted.
         - 1D arrays of shape (M,) imply B=1.
+
+        Forward velocities:
+        - Optional positive scalar or (B,) array in m/s. A single microwave
+          parameter row broadcasts over a velocity array. Otherwise rows pair
+          with velocities; repeat/tile rows to construct a Cartesian scan.
+        - Samples stay on the reference trajectory's spatial path. All three
+          velocity components scale together, preserving its slope; dt scales
+          by reference Vini[2] / forward_velocities. Uniform sampling therefore
+          means fixed dz, not fixed dt across velocities.
+        - Identical detuning/power rows share frozen microwave eigensolves.
+          Multitone scans retain per-point solves and use physical beat times.
+        - t_array and label-gap diagnostics use reference-trajectory time;
+          result.times_per_point gives each point's physical times.
 
         Parallelism:
         - `workers=1` (the default) runs the serial shared-slow scan.
@@ -1909,7 +1932,25 @@ class Simulator:
         if np.any(inten_b < 0):
             raise ValueError("intensity_prefactors must be >= 0")
 
+        if forward_velocities is not None:
+            velocities = np.asarray(forward_velocities, dtype=float)
+            if velocities.ndim > 1 or velocities.size == 0:
+                raise ValueError("forward_velocities must be a positive scalar or (B,) array")
+            velocities = velocities.reshape(-1)
+            if det_b.shape[0] == 1 and velocities.size > 1:
+                det_b = np.repeat(det_b, velocities.size, axis=0)
+                inten_b = np.repeat(inten_b, velocities.size, axis=0)
+            if velocities.size not in (1, det_b.shape[0]):
+                raise ValueError("forward_velocities must be scalar or match scan batch size")
+            if not np.all(np.isfinite(velocities)) or np.any(velocities <= 0):
+                raise ValueError("forward_velocities must be finite and positive")
+            if not np.isfinite(self.trajectory.Vini[2]) or self.trajectory.Vini[2] <= 0:
+                raise ValueError("velocity scans require positive reference forward velocity")
+            forward_velocities = np.broadcast_to(velocities, (det_b.shape[0],)).copy()
         batch = int(det_b.shape[0])
+        time_scales = None if forward_velocities is None else (
+            self.trajectory.Vini[2] / forward_velocities
+        )
         fields_by_je: dict[int, list[int]] = {}
         for idx, mw in enumerate(self.microwave_fields):
             fields_by_je.setdefault(mw.Je, []).append(idx)
@@ -1948,6 +1989,7 @@ class Simulator:
                 step_density_order=step_density_order,
                 time_sampling=time_sampling,
                 propagator=propagator,
+                forward_velocities=forward_velocities,
             )
 
         # Build per-microwave H_mu(t) functions (shared across batch)
@@ -2025,6 +2067,7 @@ class Simulator:
                     t_array=t_array,
                     static_field_indices=static_field_indices,
                     beat_fields=beat_fields,
+                    time_scales=time_scales,
                     monitor_states=monitor_states,
                     store_final_probabilities=store_final_probabilities,
                     store_final_monitor_probabilities=store_final_monitor_probabilities,
@@ -2045,6 +2088,7 @@ class Simulator:
                 ) = self._time_evolve_mu_batched_shared_slow(
                     H_slow_t=H_t,
                     muw_hams=muw_hams,
+                    time_scales=time_scales,
                     coupling_scales=coupling_scales,
                     D_mu_diag_batch=D_mu_diag_batch,
                     t_array=t_array,
@@ -2072,6 +2116,7 @@ class Simulator:
             V_ini=V_ini,
             V_fin=V_fin,
             label_gaps=getattr(self, "_label_gaps", None),
+            forward_velocities=forward_velocities,
             time_grid="uniform" if step_density is None else "graded",
             time_sampling=time_sampling,
             propagator=propagator,
@@ -2096,6 +2141,7 @@ class Simulator:
         time_sampling: str = "mid",
         propagator: str = "frozen",
         block_eigh: bool = True,
+        forward_velocities: Optional[np.ndarray] = None,
     ) -> MicrowaveScanResult:
         propagator = _normalize_propagator(propagator)
         batch = int(detunings_hz.shape[0])
@@ -2119,6 +2165,7 @@ class Simulator:
                 time_sampling=time_sampling,
                 propagator=propagator,
                 block_eigh=block_eigh,
+                forward_velocities=forward_velocities,
             )
 
         chunk_indices = np.array_split(np.arange(batch), n_jobs)
@@ -2142,6 +2189,7 @@ class Simulator:
                 time_sampling=time_sampling,
                 propagator=propagator,
                 block_eigh=block_eigh,
+                forward_velocities=None if forward_velocities is None else forward_velocities[indices],
             )
 
         results = Parallel(n_jobs=n_jobs, backend="loky")(
@@ -2181,6 +2229,7 @@ class Simulator:
             time_grid=first.time_grid,
             time_sampling=first.time_sampling,
             propagator=first.propagator,
+            forward_velocities=forward_velocities,
         )
 
     def _time_evolve_mu_batched_shared_slow(
@@ -2199,6 +2248,7 @@ class Simulator:
         time_sampling: str = "mid",
         propagator: str = "frozen",
         eigen_blocks: Optional[List[np.ndarray]] = None,
+        time_scales: Optional[np.ndarray] = None,
     ):
         """Batched microwave evolution with shared slow diagonalization.
 
@@ -2218,6 +2268,14 @@ class Simulator:
         if coupling_scales.shape[1] != len(muw_hams):
             raise ValueError(
                 f"coupling_scales has M={coupling_scales.shape[1]} but muw_hams has M={len(muw_hams)}"
+            )
+
+        velocity_scales = np.ones(batch) if time_scales is None else time_scales
+        solve_groups = np.arange(batch)
+        if time_scales is not None:
+            _, solve_groups = np.unique(
+                np.concatenate((coupling_scales, D_mu_diag_batch), axis=1),
+                axis=0, return_inverse=True,
             )
 
         # Calculate Hamiltonian at tini
@@ -2307,7 +2365,16 @@ class Simulator:
                 if eigen_blocks is not None else None
             )
 
+            solved = {}
             for b in range(batch):
+                dt_point = dt * velocity_scales[b]
+                group = int(solve_groups[b])
+                if propagator == "frozen" and group in solved:
+                    D_rot, V_rot = solved[group]
+                    tmp2 = psis_slow[b] @ V_rot.conj()
+                    tmp2 *= np.exp(-1j * D_rot * dt_point)[None, :]
+                    psis_slow[b] = tmp2 @ V_rot.T
+                    continue
                 # Assemble rotating-frame Hamiltonian (in slow-eigenbasis)
                 H_rot = (coupling_scales[b, 0] * H_mu_rot[0]).copy()
                 for j in range(1, len(H_mu_rot)):
@@ -2327,9 +2394,9 @@ class Simulator:
                     # Check `bench_magnus_commutator.py` before selecting it; see
                     # `PROPAGATORS` above and Priority E in IMPROVEMENTS.md.
                     delta = D + D_mu_diag_batch[b]
-                    A = H_rot * magnus_integral(delta, dt)
+                    A = H_rot * magnus_integral(delta, dt_point)
                     psis_slow[b] = apply_magnus_taylor(A, psis_slow[b]) * np.exp(
-                        -1j * delta * dt
+                        -1j * delta * dt_point
                     )[None, :]
                     continue
 
@@ -2351,7 +2418,9 @@ class Simulator:
                 else:
                     raise ValueError("Unknown eig_backend. Expected 'zheevd' or 'numpy'.")
 
-                phases_rot = np.exp(-1j * D_rot * dt)
+                if time_scales is not None:
+                    solved[group] = (D_rot, V_rot)
+                phases_rot = np.exp(-1j * D_rot * dt_point)
                 tmp2 = psis_slow[b] @ V_rot.conj()
                 tmp2 *= phases_rot[np.newaxis, :]
                 psis_slow[b] = tmp2 @ V_rot.T
@@ -2393,6 +2462,7 @@ class Simulator:
         time_sampling: str = "mid",
         propagator: str = "frozen",
         eigen_blocks: Optional[List[np.ndarray]] = None,
+        time_scales: Optional[np.ndarray] = None,
     ):
         """Batched shared-slow evolution with beat phases for same-manifold tones."""
         # `"frozen"` freezes `H` at the sample point and exponentiates that
@@ -2405,6 +2475,7 @@ class Simulator:
         if D_mu_diag_batch.ndim != 2:
             raise ValueError("D_mu_diag_batch must have shape (B,n)")
         batch = int(D_mu_diag_batch.shape[0])
+        velocity_scales = np.ones(batch) if time_scales is None else time_scales
 
         coupling_scales = np.asarray(coupling_scales)
         if coupling_scales.ndim != 2 or coupling_scales.shape[0] != batch:
@@ -2484,7 +2555,7 @@ class Simulator:
                 lower_rot.append(Vh @ lower @ V)
 
             beat_phases = [
-                (field_idx, np.exp(-1j * delta_omega * t_sample))
+                (field_idx, np.exp(-1j * delta_omega * t_sample * velocity_scales))
                 for field_idx, delta_omega in beat_fields
             ] if propagator == "frozen" else []
             # The exact propagator freezes the beat at `t_sample` (midpoint
@@ -2504,6 +2575,7 @@ class Simulator:
             )
 
             for b in range(batch):
+                dt_point = dt * velocity_scales[b]
                 if propagator == "magnus":
                     # Each component needs its own oscillatory kernel. A beating
                     # field rotates at `delta_omega` *within* the step, so its
@@ -2514,12 +2586,12 @@ class Simulator:
                     # `delta_omega * dt` is not small -- which is the regime this
                     # path exists for.
                     delta = D + D_mu_diag_batch[b]
-                    e_delta = np.exp(1j * delta * dt)
+                    e_delta = np.exp(1j * delta * dt_point)
                     outer = np.outer(e_delta, e_delta.conj())
                     gaps = delta[:, None] - delta[None, :]
                     A = np.zeros((n, n), dtype=np.complex128)
                     if static_field_indices:
-                        static_kernel = _magnus_integral_from_outer(outer, gaps, dt)
+                        static_kernel = _magnus_integral_from_outer(outer, gaps, dt_point)
                         for field_idx in static_field_indices:
                             A += (
                                 coupling_scales[b, field_idx]
@@ -2546,15 +2618,15 @@ class Simulator:
                         # between them is observable. That is the production
                         # configuration (SPA2 + backgrounds), where it shifts
                         # populations by `5e-03` at `N_steps=4000`.
-                        beat = np.exp(-1j * w * t0_step)
+                        beat = np.exp(-1j * w * t0_step * velocity_scales[b])
                         A += coupling_scales[b, field_idx] * (
                             beat * upper_rot[field_idx]
-                            * _magnus_integral_from_outer(outer, gaps, dt, -w)
+                            * _magnus_integral_from_outer(outer, gaps, dt_point, -w)
                             + beat.conjugate() * lower_rot[field_idx]
-                            * _magnus_integral_from_outer(outer, gaps, dt, w)
+                            * _magnus_integral_from_outer(outer, gaps, dt_point, w)
                         )
                     psis_slow[b] = apply_magnus_taylor(A, psis_slow[b]) * np.exp(
-                        -1j * delta * dt
+                        -1j * delta * dt_point
                     )[None, :]
                     continue
 
@@ -2585,7 +2657,7 @@ class Simulator:
                 else:
                     raise ValueError("Unknown eig_backend. Expected 'zheevd' or 'numpy'.")
 
-                phases_rot = np.exp(-1j * D_rot * dt)
+                phases_rot = np.exp(-1j * D_rot * dt_point)
                 tmp2 = psis_slow[b] @ V_rot.conj()
                 tmp2 *= phases_rot[np.newaxis, :]
                 psis_slow[b] = tmp2 @ V_rot.T
