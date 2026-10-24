@@ -65,6 +65,7 @@ def main() -> None:
             "initial_states": args.initial_states,
             "dtype": args.dtype,
             "profile_step_stride": 25,
+            "slow_eigh_sampling": "every tile, weighted per propagated step",
         },
         results=results,
         include_gpu_env=True,

@@ -36,12 +36,23 @@ def eigh_in_blocks(matrix, blocks):
     values_full = torch.empty(matrix.shape[:-2] + (n,), dtype=matrix.real.dtype, device=matrix.device)
     vectors_full = torch.zeros_like(matrix)
     labels_full = torch.empty(matrix.shape[:-2] + (n,), dtype=torch.int64, device=matrix.device)
+    # Equal-sized sectors can share one batched solver call. Keep each sector's
+    # original indices/label: their columns move after every slow-spectrum sort.
+    by_width = {}
     for block_id, indices in enumerate(blocks):
-        submatrix = matrix[..., indices[:, None], indices[None, :]]
-        values, vectors = torch.linalg.eigh(submatrix)
-        values_full[..., indices] = values
-        vectors_full[..., indices[:, None], indices[None, :]] = vectors
+        by_width.setdefault(len(indices), []).append((block_id, indices))
         labels_full[..., indices] = block_id
+    for width, sectors in by_width.items():
+        indices = torch.stack([indices for _, indices in sectors])
+        rows, columns = indices[:, :, None], indices[:, None, :]
+        submatrix = matrix[..., rows, columns]
+        if width == 1:
+            values = submatrix[..., 0].real
+            vectors = torch.ones_like(submatrix)
+        else:
+            values, vectors = torch.linalg.eigh(submatrix)
+        values_full[..., indices] = values
+        vectors_full[..., rows, columns] = vectors
     order = torch.argsort(values_full, dim=-1, stable=True)
     return (
         torch.gather(values_full, -1, order),

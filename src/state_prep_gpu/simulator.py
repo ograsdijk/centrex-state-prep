@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from operator import index
 from typing import Any, Optional
 
 from ._torch import torch as get_torch
@@ -457,6 +458,7 @@ def simulate_batched_scalar_microwaves_shared_slow(
     profile_timings: Optional[dict[str, list[float]]] = None,
     profile_step_stride: int = 25,
     block_eigh: bool | str = "auto",
+    slow_eigh_chunk_size: Optional[int] = None,
 ) -> BatchedSimulationOutput:
     """GPU time evolution for microwave scans with a *shared* slow Hamiltonian.
 
@@ -477,11 +479,18 @@ def simulate_batched_scalar_microwaves_shared_slow(
     - store_every: optional stride for retaining state vectors, including the
       initial and final states. `None` keeps final-only storage.
     - profile_timings: optional dict populated with sampled CUDA-event timings
-      for propagation stages. Profiling synchronizes once at the end.
-    - profile_step_stride: sample one step every this many propagation steps.
+      for propagation stages. Profiling synchronizes once at the end. With
+      tiles, slow_eigh records construction/solve time amortized over each
+      covered timestep; every tile is measured, including the partial tail.
+    - profile_step_stride: sample other stages every this many steps; the
+      size-one slow-solve route uses this stride too.
     - block_eigh: "auto" uses exact blocks for batches of at least 250 points;
       smaller batches use dense solves to avoid small-solver launch overhead.
       True forces detection at any batch size; False forces dense solves.
+    - slow_eigh_chunk_size: number of independent slow eigensystems solved
+      together across time. None uses 128 on CUDA and 1 on CPU tensors; 1
+      selects the original per-step solve. Tracking and propagation remain
+      sequential. Only the current tile is retained, with no cross-call cache.
     """
 
     torch = get_torch()
@@ -498,6 +507,18 @@ def simulate_batched_scalar_microwaves_shared_slow(
     if psi.ndim != 3:
         raise ValueError("psi0 must have shape (B,S,n)")
     batch = int(psi.shape[0])
+
+    if slow_eigh_chunk_size is None:
+        slow_eigh_chunk_size = 128 if psi.device.type == "cuda" else 1
+    else:
+        try:
+            if isinstance(slow_eigh_chunk_size, bool):
+                raise TypeError
+            slow_eigh_chunk_size = index(slow_eigh_chunk_size)
+        except TypeError:
+            raise ValueError("slow_eigh_chunk_size must be None or a positive integer") from None
+        if slow_eigh_chunk_size < 1:
+            raise ValueError("slow_eigh_chunk_size must be None or a positive integer")
 
     n = terms.n
     if psi.shape[-1] != n:
@@ -564,25 +585,48 @@ def simulate_batched_scalar_microwaves_shared_slow(
     if profile_timings is not None and psi.device.type != "cuda":
         raise ValueError("profile_timings requires CUDA tensors")
     profile_events: dict[str, list[tuple[Any, Any]]] = {}
+    slow_profile_events: list[tuple[Any, Any, int]] = []
 
     psi_history, history_indices, history_cursor = _new_history(
         torch, psi, T, store_every
     )
 
     last_evecs = V_ref
+    slow_values = slow_vectors = slow_sector_labels = None
     for i in range(T - 1):
         profile_this_step = profile_timings is not None and i % profile_step_stride == 0
-        H_slow = slow_hamiltonian_batch(terms, E_t[i], B_t[i])  # (n,n)
-        if profile_this_step:
-            slow_start, slow_end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-            slow_start.record()
-        if blocks is None:
-            D, V = torch.linalg.eigh(H_slow)
-        else:
-            D, V, slow_labels = eigh_in_blocks(H_slow, blocks)
-        if profile_this_step:
-            slow_end.record()
-            profile_events.setdefault("slow_eigh", []).append((slow_start, slow_end))
+        offset = i % slow_eigh_chunk_size
+        if offset == 0:
+            # Drop the previous tile and its last views before allocating the
+            # next one. The initial/last tracked bases own separate storage.
+            slow_values = slow_vectors = slow_sector_labels = None
+            if i:
+                del D, V
+                if blocks is not None:
+                    del slow_labels
+            end = min(i + slow_eigh_chunk_size, T - 1)
+            profile_slow = profile_timings is not None and (slow_eigh_chunk_size > 1 or profile_this_step)
+            if profile_slow:
+                slow_start, slow_end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                slow_start.record()
+            # A size-one chunk keeps the original unbatched solver route.
+            fields = (E_t[i], B_t[i]) if slow_eigh_chunk_size == 1 else (E_t[i:end], B_t[i:end])
+            H_slow = slow_hamiltonian_batch(terms, *fields)
+            if blocks is None:
+                slow_values, slow_vectors = torch.linalg.eigh(H_slow)
+            else:
+                slow_values, slow_vectors, slow_sector_labels = eigh_in_blocks(H_slow, blocks)
+            del H_slow
+            if slow_eigh_chunk_size == 1:
+                slow_values, slow_vectors = slow_values[None], slow_vectors[None]
+                if slow_sector_labels is not None:
+                    slow_sector_labels = slow_sector_labels[None]
+            if profile_slow:
+                slow_end.record()
+                slow_profile_events.append((slow_start, slow_end, end - i))
+        D, V = slow_values[offset], slow_vectors[offset]
+        if blocks is not None:
+            slow_labels = slow_sector_labels[offset]
 
         # Track eigenvectors for output/monitor semantics
         if profile_this_step:
@@ -657,6 +701,11 @@ def simulate_batched_scalar_microwaves_shared_slow(
         profile_timings.clear()
         for name, pairs in profile_events.items():
             profile_timings[name] = [start.elapsed_time(end) / 1000.0 for start, end in pairs]
+        # Amortize every profiled tile over its covered steps, weighting a
+        # partial final tile correctly. Existing mean-per-step consumers work.
+        profile_timings["slow_eigh"] = []
+        for start, end, width in slow_profile_events:
+            profile_timings["slow_eigh"].extend([start.elapsed_time(end) / (1000.0 * width)] * width)
 
     probabilities_final = None
     if return_final_probabilities:

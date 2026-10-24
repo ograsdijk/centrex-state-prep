@@ -1,5 +1,317 @@
 # Performance Benchmark Results
 
+## Production GPU slow-eigensolve tiles (2026-10-24)
+
+The shared-slow GPU scan now batches independent slow eigensolves across
+timesteps in bounded tiles. `slow_eigh_chunk_size=None` selects 128 on CUDA
+and 1 on CPU tensors; `1` selects per-step solves explicitly. Tracking,
+propagation, monitors, and history remain sequential. The true initial solve
+is separate. Exact sector labels are retained per timestep and rotating-frame
+groups are recomputed after every sorted spectrum, including tile boundaries.
+Dense transverse fields require no symmetry assumption. Only the current tile
+is retained, about 8.45 MB of eigensystems at 64 states/complex128, plus input
+matrices, optional sector labels, and solver workspace.
+
+Production comparisons load the pre-tile simulator from Git revision `b02b546`.
+Both variants import the same current block and assignment helpers, isolating
+the timestep change from the earlier helper optimizations. Runner preparation
+is excluded; support detection and all tile construction/solves inside each
+propagation are included. Four initial states and complex128 were used on the
+same RTX 5070 Ti environment as the investigation below.
+
+| Fields | Steps | Points | Repeats | Pre-tile mean ± std | Production tiles mean ± std | Assessment |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Transverse B | 300 | 250 | 5 | 5.842 ± 0.212 s | 4.709 ± 0.130 s | 19.4% less runtime |
+| Varying E | 150 | 25 | 7 | 1.237 ± 0.045 s | 0.626 ± 0.036 s | 49.4% less runtime |
+| Varying E | 300 | 250 | 7 | 5.808 ± 0.125 s | 4.580 ± 0.066 s | 21.1% less runtime |
+| Aligned | 150 | 25 | 7 | 2.987 ± 1.029 s | 1.723 ± 0.540 s | Unproven by combined-spread rule |
+| Aligned | 300 | 250 | 7 | 6.054 ± 4.852 s | 3.068 ± 1.746 s | Unproven by combined-spread rule |
+
+All comparisons used one warmup, interleaved rounds, and sample standard
+deviations. The first five-round dataset suffered severe pauses, including
+aligned-case measurements from 2.6 to 21.9 s, and a varying-E outlier. It is
+retained as `results/gpu_slow_tiles_production_20261024.json`. Aligned and
+varying-E cases were then repeated with seven rounds; no individual samples
+were removed. The retry is `results/gpu_slow_tiles_retry_20261024.json`.
+Aligned-case variability persisted, so no precise aligned-path speedup is
+claimed. In the varying-E retry, paired 95% intervals for runtime changes were
+[-0.632, -0.590] s at 25 points and [-1.356, -1.101] s at 250 points. The
+transverse-B 250-point interval was [-1.531, -0.734] s.
+
+All initial production cases agreed with the pre-tile path within 5.49e-9 in a
+common physical readout basis and with a seven-point CPU reference subset
+within 5.15e-9. The complete regression suite passed. New tests cover CPU/CUDA,
+complex64/complex128, fully connected late transverse fields, exact blocks and
+sector crossings, per-step/per-point nonuniform dt, per-point envelopes, distinct
+initial fields, monitors, history, the partial tile, default selection, invalid
+tile sizes, and a non-default CUDA stream. A bounded-sampling test confirms
+tile widths of 128,128,3 for 259 propagated samples, excluding the terminal
+sample. The existing adiabatic-label API warning remains expected.
+
+A separate 1,000-step/250-point varying-E check agreed with the pre-tile path
+within 3.74e-9 and the CPU subset within 2.67e-9 in common-basis populations;
+physical-fidelity deviation from the pre-tile result was 8.76e-13. Its single
+run is numerical validation only, not a speedup measurement, and is saved as
+`results/gpu_slow_tiles_long_agreement_20261024.json`. The CPU/GPU comparison
+example also passed (maximum common-basis probability difference 1.89e-15).
+
+`slow_eigh` profiling now includes tile construction and solve time, amortized
+over covered timesteps and weighting the partial tail correctly. All tiles are
+profiled when tiling is active; other stages retain their sampling stride.
+Historical solver/cache prototypes explicitly request chunk size 1 so their
+baselines remain per-step after the production default changes.
+
+```powershell
+$env:PYTHONPATH = "$PWD\src"
+& $python benchmarks/bench_gpu_slow_tiles.py --cases aligned transverse_b varying_e --shapes 150:25 300:250 --warmup 1 --repeat 5 --output results/gpu_slow_tiles_new.json
+& $python benchmarks/bench_gpu_slow_tiles.py --cases aligned varying_e --shapes 150:25 300:250 --warmup 1 --repeat 7 --output results/gpu_slow_tiles_retry_new.json
+```
+
+## Dense solver, overhead, and reuse experiments (2026-10-24)
+
+All four follow-up investigations are documented in
+[DENSE_PERFORMANCE_INVESTIGATION.md](DENSE_PERFORMANCE_INVESTIGATION.md).
+Alternative CPU/GPU dense solvers did not beat the current drivers. CPU layout
+and scratch reuse did not establish a gain. A native GPU dispatch/scratch
+prototype saved 3.5% at 300 steps/250 points, while a 128-step slow-eigensolve
+tile saved 18.7% on the dense varying-E path (5.776 ± 0.289 s to
+4.696 ± 0.213 s), including per-call tile preparation. At 150 steps/25 points,
+the same tile saved 49.3% (1.128 ± 0.114 s to 0.572 ± 0.039 s).
+These paired results use one warmup/five repeats and agree in physical-basis
+populations within 5.32e-9. Full cross-call caching delivered little further
+GPU benefit beyond per-call prebatching; CPU cache benefit was limited to the
+smaller tested scan. These are benchmark prototypes, not production API changes
+or timestep-convergence claims. The detailed report records rejected options,
+cache build cost, memory, invalidation checks, CUDA traces, and limitations.
+
+## Non-collinear field profiles (2026-10-24)
+
+The block-overhead improvements below were checked against synthetic
+non-collinear variants of the same SPA2 benchmark. The reference microwaves,
+carriers, initial states, and detunings were retained. Two field variants were
+defined in the existing XYZ field coordinates and existing field units:
+
+- `transverse_b`: keep Bz and add Bx = 0.3 Bz, By = 0.2 Bz; electric field stays
+  on z. Electric and magnetic fields are therefore non-collinear.
+- `varying_e`: keep Ez and add Ex = 0.02 Ez sin(phi), Ey = 0.01 Ez cos(phi),
+  with phi = 2 pi (z + 0.08) / 0.28 along the original trajectory in meters.
+  The magnetic field stays on z and the electric-field direction varies.
+
+These are synthetic general-path probes, not measured experimental field maps.
+Both CPU and GPU detectors returned no usable blocks for both variants and
+executed dense solves. The aligned reference retained the nine SPA2 blocks.
+Thus the earlier block-helper changes do not accelerate these dense paths.
+
+At 300 steps, four initial states, one warmup and five repeats, uninstrumented
+timings were as follows. CPU used one worker and 42 scan points, representative
+of a six-worker chunk; GPU used 250 scan points. The CPU points were an evenly
+spaced subset of the GPU grid, permitting physical output comparisons. These
+columns have different batch sizes and are not a CPU-versus-GPU speed comparison.
+Spreads here are population standard deviations (`ddof=0`, recorded in JSON).
+
+| Fields | Usable blocks on both devices | CPU mean ± std, 42 points | GPU mean ± std, 250 points |
+| --- | --- | ---: | ---: |
+| Aligned reference | 12,14,12,8,8,4,4,1,1 | 1.761 ± 0.044 s | 2.445 ± 0.080 s |
+| Transverse B | None | 4.439 ± 0.123 s | 5.611 ± 0.018 s |
+| Varying E direction | None | 4.271 ± 0.074 s | 5.754 ± 0.221 s |
+
+CPU timings include scan preparation. GPU timings exclude runner preparation
+but include support detection inside propagation. These compare different
+physical workloads; they are not an interleaved optimization speedup claim.
+
+### Dense-path bottlenecks
+
+Direct wrappers around CPU LAPACK calls separated native solve time from the
+surrounding Python evolution loop, where `cProfile` otherwise hides it. A
+separate warmed diagnostic run counted exactly 299 shared slow solves and
+12,558 rotating-frame solves per case (one slow solve plus 42 point solves per
+propagated step):
+
+| CPU stage | Transverse B, profiled wall 4.833 s | Varying E, profiled wall 4.745 s |
+| --- | ---: | ---: |
+| Shared slow eigensolves | 0.096 s (2.0%) | 0.095 s (2.0%) |
+| Rotating-frame eigensolves | 4.000 s (82.8%) | 3.923 s (82.7%) |
+
+Sampled CUDA-event profiles gave:
+
+| GPU stage | Transverse B, profiled wall 5.685 s | Varying E, profiled wall 5.556 s |
+| --- | ---: | ---: |
+| Shared slow eigensolves | 0.965 s (17.0%) | 0.930 s (16.7%) |
+| Batched rotating-frame eigensolves | 4.211 s (74.1%) | 4.107 s (73.9%) |
+| Eigenvector tracking | 0.163 s (2.9%) | 0.170 s (3.1%) |
+| Microwave rotate/assembly | 0.120 s (2.1%) | 0.118 s (2.1%) |
+| State update | 0.208 s (3.7%) | 0.206 s (3.7%) |
+
+CUDA events sample every 25 steps (12 samples here) and include solver-call
+launch/synchronization delays within each region. They do not distinguish
+GPU arithmetic from idle/dispatch time. Native CPU wrappers and profiling also
+add overhead, so these shares are diagnostics, not replacement benchmark times.
+
+The main general-path target is therefore the dense rotating-frame solve on
+both devices. Optimizing only shared slow work has a limited measured ceiling
+for CPU chunks; tracking/field assembly also cannot explain most runtime.
+The next solver experiment should use these genuinely complex 64x64 dense
+matrices, benchmark alternatives end to end, and check full physical states.
+No general dense-path speedup has been demonstrated by this investigation.
+
+CPU/GPU probabilities in one fixed physical readout basis agreed within
+9.12e-9 across all three cases; maximum physical state-fidelity deviation was
+2.02e-13. No simulator source was changed for these profiles.
+
+```powershell
+$env:PYTHONPATH = "$PWD\src"
+& $python benchmarks/profile_transverse_fields.py --steps 300 --cpu-batch 42 --gpu-batch 250 --warmup 1 --repeat 5 --output-dir results/transverse_profile_new
+```
+
+Raw JSON, CPU cProfile dumps, and readable profiles are under the ignored
+`results/transverse_profile_20261024/` directory. The native-call diagnostic
+profiles are included in its `profile.json`.
+
+## Block-solver bottlenecks and local fixes (2026-10-24)
+
+Profiles of the merged `b02b546` production paths located the cost in block
+eigensolves and their overhead. At 300 steps and 250 points, CPU `cProfile`
+attributed 83% of its instrumented runtime to `_eigh_in_blocks`, including 37%
+in `np.ix_`. At 42 points (representative of one six-worker chunk), the
+corresponding shares were 77% and 34%. These are diagnostic profiler shares:
+`cProfile` inflates frequent Python calls, so they are not estimates of the
+speedup available in an uninstrumented run.
+
+A warmed CUDA-event profile at 300 steps and 250 points estimated 1.18 s in
+shared slow eigensolves and 1.65 s in rotating-frame eigensolves, against a
+3.28 s profiled wall time. Together those stages account for about 86%; slow
+eigenvector assignment took about 0.14 s (4%). These event regions include
+launch/synchronization overhead and GPU idle time within a region, so this
+does not establish that eigensolver arithmetic alone occupies 86% of the GPU.
+
+Two local helper changes address that overhead without changing the numerical
+method, blocks, propagation, tracking objective, or public API:
+
+- CPU: use direct integer-array indexing and output column slices instead of
+  rebuilding `np.ix_` arrays and `arange` columns for every block and point.
+- GPU: batch equal-sized exact sectors into one eigensolver call, and handle
+  1×1 blocks directly. The SPA2 layout needs four solver calls instead of nine
+  in each block solve. Sector indices are still recomputed after every slow
+  spectrum sort, and original sector labels are preserved.
+
+Baseline and candidate were measured in one process/session, interleaved with
+one warmup and five repeats per case, on the same Ryzen 7 9800X3D / RTX 5070 Ti
+environment as below. Spreads are sample standard deviations. CPU measurements
+use one worker and include scan preparation; GPU measurements exclude runner
+preparation but include support discovery inside propagation. They measure
+runtime, not timestep accuracy or full independent-job startup costs.
+
+| Device | Steps | Points | Baseline mean ± std | Candidate mean ± std | Runtime reduction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| CPU | 500 | 25 | 2.634 ± 0.169 s | 2.242 ± 0.038 s | 14.9% |
+| CPU | 500 | 42 | 4.008 ± 0.130 s | 3.202 ± 0.096 s | 20.1% |
+| CPU | 1000 | 25 | 5.030 ± 0.154 s | 4.156 ± 0.142 s | 17.4% |
+| CPU | 1000 | 42 | 7.636 ± 0.492 s | 6.189 ± 0.461 s | 19.0% |
+| GPU | 500 | 250 | 5.461 ± 0.182 s | 4.193 ± 0.250 s | 23.2% |
+| GPU | 500 | 500 | 7.065 ± 0.030 s | 5.704 ± 0.004 s | 19.3% |
+| GPU | 1000 | 250 | 11.140 ± 0.412 s | 8.195 ± 0.050 s | 26.4% |
+| GPU | 1000 | 500 | 14.162 ± 0.268 s | 11.416 ± 0.152 s | 19.4% |
+
+All paired 95% intervals excluded zero and all mean improvements exceeded the
+summed baseline/candidate standard deviations. All final probabilities were
+identical to baseline; maximum deviation of physical state fidelity from one
+was 6.90e-13. This is evidence for these SPA2 workloads, not a guarantee for
+dense fallbacks, other block layouts, or multitone Magnus.
+
+Reproduce using the merged baseline revision:
+
+```powershell
+$env:PYTHONPATH = "$PWD\src"
+& $python benchmarks/bench_block_overhead.py --device cpu --steps 500 1000 --batches 25 42 --baseline-ref b02b546 --warmup 1 --repeat 5 --output results/cpu_block_overhead_new.json
+& $python benchmarks/bench_block_overhead.py --device gpu --steps 500 1000 --batches 250 500 --baseline-ref b02b546 --warmup 1 --repeat 5 --output results/gpu_block_overhead_new.json
+```
+
+Raw reports and diagnostic profiles are retained under the ignored directory
+`results/bottlenecks_20261024/`.
+
+After the change, a separate warmed 300-step/250-point CUDA-event profile
+estimated 0.70 s in slow eigensolves (27% of its 2.55 s wall time), 1.36 s in
+rotating-frame eigensolves (53%), 0.16 s in tracking (6%), 0.12 s in microwave
+assembly (5%), and 0.19 s in state updates (8%). Thus eigensolves remain the
+main measured target. These sampled profiles diagnose stages; the repeated
+paired measurements above establish the speedup. Further work should measure
+solver/launch costs within those stages before introducing a new solver or
+precomputation scheme.
+
+Validation: the complete pytest suite passed, including new complex-matrix
+reconstruction/sector-label tests on CPU and CUDA with repeated block sizes,
+non-contiguous indices, 1×1 sectors, multiple batch dimensions, and both GPU
+complex precisions. The CPU/GPU comparison example passed with maximum
+common-basis probability difference 1.89e-15. One existing adiabatic-label
+warning was emitted by the API test. No timestep or physics change was made.
+
+## Independent CPU/GPU job pilot (2026-10-24)
+
+Two separate SPA2 simulations used 250 detuning points each from -2 to +1 MHz,
+four initial states, and intensity prefactors of 0.5 and 1.0 respectively for
+both microwave fields. The half-power job ran on six CPU workers (one BLAS
+thread each); the full-power job ran on the GPU with one PyTorch CPU thread.
+Each had its own parameter file, launcher process, checkpoints, and results.
+This is independent-job concurrency, rather than partitioning one scan.
+
+On the Ryzen 7 9800X3D / RTX 5070 Ti environment documented below, at 1,000
+steps, one warmup and five interleaved repeats measured the total time to finish
+both jobs, including startup, preparation, output, and validation:
+
+| Execution | Mean ± sample std | Total scan points/s |
+| --- | ---: | ---: |
+| CPU job followed by GPU job | 34.599 ± 1.011 s | 14.45 |
+| CPU and GPU jobs simultaneously | 20.334 ± 1.351 s | 24.59 |
+
+Concurrency reduced wall time by 41.2% (1.702x throughput). All five rounds
+favored concurrency; the paired difference was -14.266 ± 0.304 s (standard
+error), with 95% interval [-15.109, -13.422] s. This comparison uses the same
+six CPU workers in both variants. It does not compare against assigning both
+jobs to CPU only, or establish the optimum worker count or production speedup.
+
+Final states were projected into one fixed physical readout basis rather than
+compared by tracked labels. Sequential and concurrent final probabilities were
+identical in the final round. Every run passed the agreement checks. A separate
+CPU execution of the full-power job differed from GPU by at most 3.90e-9 in
+probability. The largest state normalization error across all pilot jobs was
+2.40e-12.
+
+### Timestep accuracy remains a separate constraint
+
+GPU convergence runs covered both full 250-point grids using uniform midpoint
+frozen propagation. Maximum absolute changes in individual common-basis
+populations between successive refinements were:
+
+| Refinement | Half power | Full power |
+| --- | ---: | ---: |
+| 1,000 → 2,000 | 0.01464 | 0.02109 |
+| 2,000 → 4,000 | 0.00790 | 0.01212 |
+| 4,000 → 8,000 | 0.00169 | 0.00264 |
+
+For 4,000 → 8,000, maximum changes in physical J=2 manifold populations were
+0.00174 and 0.00262. Lineshape alignment found zero shift at its 0.1 kHz search
+resolution for that pair; worst RMS residuals across initial states were
+5.08e-4 and 6.92e-4. Alignment here is a diagnostic, not permission to discard
+errors at the requested physical detunings.
+
+The 1,000-step timing workload is not a precision production configuration.
+The 8,000-step results also do not yet certify 0.001 absolute population
+accuracy; finer references are needed before making that claim. No larger
+production scan was launched from this pilot. These conclusions apply to the
+benchmark SPA2 model, not the distinct-carrier multitone/Magnus workflows.
+
+Reproduce with a fresh output directory:
+
+```powershell
+$env:PYTHONPATH = "$PWD\src"
+& $python benchmarks/bench_independent_jobs.py --steps 1000 --batch 250 --workers 6 --warmup 1 --repeat 5 --convergence-steps 1000 2000 4000 8000 --output-dir results/independent_pilot_new
+```
+
+Raw reports and checkpoints from this session are in the ignored directory
+`results/independent_pilot_20261024/`, including `comparison.json`,
+`convergence.json`, and per-job launcher logs. The runner refuses existing
+output directories to prevent checkpoint reuse from becoming a false speedup.
+
 ## Local CPU/GPU updates (2026-10-24)
 
 Measured on Windows with an AMD Ryzen 7 9800X3D (8 cores/16 threads), NVIDIA
