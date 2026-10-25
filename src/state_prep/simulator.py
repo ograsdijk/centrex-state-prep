@@ -2476,6 +2476,16 @@ class Simulator:
             raise ValueError("D_mu_diag_batch must have shape (B,n)")
         batch = int(D_mu_diag_batch.shape[0])
         velocity_scales = np.ones(batch) if time_scales is None else time_scales
+        kernel_groups = kernel_counts = None
+        if propagator == "magnus":
+            # Power does not enter the oscillatory integrals. Reuse them only
+            # for identical shifts, traversal times and beat frequencies.
+            keys = [D_mu_diag_batch, velocity_scales[:, None]]
+            keys.extend(frequency[:, None] for _, frequency in beat_fields)
+            _, kernel_groups, kernel_counts = np.unique(
+                np.concatenate(keys, axis=1), axis=0,
+                return_inverse=True, return_counts=True,
+            )
 
         coupling_scales = np.asarray(coupling_scales)
         if coupling_scales.ndim != 2 or coupling_scales.shape[0] != batch:
@@ -2574,6 +2584,7 @@ class Simulator:
                 if eigen_blocks is not None else None
             )
 
+            integrated_fields = {}
             for b in range(batch):
                 dt_point = dt * velocity_scales[b]
                 if propagator == "magnus":
@@ -2585,46 +2596,38 @@ class Simulator:
                     # beat phase frozen at `t_sample` would be wrong whenever
                     # `delta_omega * dt` is not small -- which is the regime this
                     # path exists for.
-                    delta = D + D_mu_diag_batch[b]
-                    e_delta = np.exp(1j * delta * dt_point)
-                    outer = np.outer(e_delta, e_delta.conj())
-                    gaps = delta[:, None] - delta[None, :]
+                    group = int(kernel_groups[b])
+                    cached = integrated_fields.get(group)
+                    if cached is None:
+                        delta = D + D_mu_diag_batch[b]
+                        e_delta = np.exp(1j * delta * dt_point)
+                        outer = np.outer(e_delta, e_delta.conj())
+                        gaps = delta[:, None] - delta[None, :]
+                        fields = []
+                        if static_field_indices:
+                            kernel = _magnus_integral_from_outer(outer, gaps, dt_point)
+                            for field_idx in static_field_indices:
+                                fields.append((field_idx,
+                                    (upper_rot[field_idx] + lower_rot[field_idx]) * kernel))
+                        for field_idx, delta_omega_col in beat_fields:
+                            w = float(delta_omega_col[b])
+                            # Anchor the oscillatory integral at physical step
+                            # start, including the point's traversal time.
+                            beat = np.exp(-1j * w * t0_step * velocity_scales[b])
+                            fields.append((field_idx,
+                                beat * upper_rot[field_idx]
+                                * _magnus_integral_from_outer(outer, gaps, dt_point, -w)
+                                + beat.conjugate() * lower_rot[field_idx]
+                                * _magnus_integral_from_outer(outer, gaps, dt_point, w)))
+                        cached = delta, fields
+                        # Unique points need no retained matrices. Cache scope
+                        # is one spatial step, never the complete trajectory.
+                        if kernel_counts[group] > 1:
+                            integrated_fields[group] = cached
+                    delta, fields = cached
                     A = np.zeros((n, n), dtype=np.complex128)
-                    if static_field_indices:
-                        static_kernel = _magnus_integral_from_outer(outer, gaps, dt_point)
-                        for field_idx in static_field_indices:
-                            A += (
-                                coupling_scales[b, field_idx]
-                                * (upper_rot[field_idx] + lower_rot[field_idx])
-                                * static_kernel
-                            )
-                    for field_idx, delta_omega_col in beat_fields:
-                        w = float(delta_omega_col[b])
-                        # Anchored at the step's *left* endpoint, not `t_sample`.
-                        # The kernel is `int_0^dt exp(i*(gap + shift)*s) ds` with
-                        # `s` measured from `t0`, and the interaction picture it
-                        # inverts is the `exp(-i*delta*dt)` applied below, also
-                        # from `t0`. Factoring `exp(-i*w*(t0 + s))` therefore
-                        # leaves `exp(-i*w*t0)`. Using the midpoint here mixes two
-                        # anchors and leaves a spurious constant `exp(-i*w*dt/2)`.
-                        #
-                        # With a *single* coupled pair that stray phase is a gauge
-                        # transformation -- `exp(-i*th)` on the raising part and
-                        # its conjugate on the lowering part is `R^H (.) R` for
-                        # diagonal `R` -- so it telescopes away and changes no
-                        # population at all. It becomes physical as soon as a
-                        # second field is present, because the static coupling
-                        # does not receive the phase and the relative phase
-                        # between them is observable. That is the production
-                        # configuration (SPA2 + backgrounds), where it shifts
-                        # populations by `5e-03` at `N_steps=4000`.
-                        beat = np.exp(-1j * w * t0_step * velocity_scales[b])
-                        A += coupling_scales[b, field_idx] * (
-                            beat * upper_rot[field_idx]
-                            * _magnus_integral_from_outer(outer, gaps, dt_point, -w)
-                            + beat.conjugate() * lower_rot[field_idx]
-                            * _magnus_integral_from_outer(outer, gaps, dt_point, w)
-                        )
+                    for field_idx, field in fields:
+                        A += coupling_scales[b, field_idx] * field
                     psis_slow[b] = apply_magnus_taylor(A, psis_slow[b]) * np.exp(
                         -1j * delta * dt_point
                     )[None, :]

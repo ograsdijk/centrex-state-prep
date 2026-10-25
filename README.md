@@ -100,8 +100,22 @@ in its `--parameters` NPZ file, alongside `(B,M)` detunings and intensity
 prefactors. The merged output retains the speeds, `reference_forward_velocity`,
 and `reference_t_array`; multiply that time array by reference speed / speed
 to recover physical times. Checkpoints include the velocity array in their
-fingerprint. The launcher's existing restriction against same-manifold beats
-on the GPU still applies.
+fingerprint. Distinct carriers on the same manifold, including an RC J12
+background, select the GPU multitone path automatically. It preserves beat
+phases and per-velocity times, using bounded time/scan tiles and dense solves.
+The setup must support fixed polarization matrices with scalar spatial envelopes;
+the launcher validates this factorization before evolving the states.
+For multitone GPU scans, `--gpu-time-chunk` (default 8) and
+`--gpu-max-eigh-matrices` (default 256) control time batching and solver workspace.
+Larger settings may improve speed at higher memory cost; they are included in
+checkpoint fingerprints. Measurements are in [RC_PERFORMANCE.md](RC_PERFORMANCE.md).
+
+For CPU multitone scans using `propagator="magnus"`, oscillatory integrals are
+reused across power points with identical detunings, velocities and beat
+frequencies. This changes neither the integrator nor its timestep requirement.
+The default `propagator="frozen"` remains unchanged. The GPU multitone path
+uses frozen propagation at the supplied sample times; changing integrators or
+step counts still requires an accuracy comparison for the intended scan.
 
 For scans where the trajectory, fields and slow Hamiltonian are shared across
 scan points and only the microwave parameters vary, use

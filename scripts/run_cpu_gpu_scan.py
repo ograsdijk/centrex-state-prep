@@ -69,12 +69,9 @@ def _worker(backend, indices, config, fingerprint, output, setup_path):
         from common import microwave_amp_t_np, microwave_base_matrices_np
 
         torch.set_num_threads(1)
-        # Reject same-manifold beating: the scalar GPU kernel does not model it.
-        carriers = {}
-        for field in setup["microwave_fields"]:
-            if field.Je in carriers and not np.isclose(carriers[field.Je], field.muW_freq):
-                raise ValueError("GPU scan does not support distinct carriers on the same manifold")
-            carriers[field.Je] = field.muW_freq
+        # The runner selects beat-correct multitone propagation when distinct
+        # carriers address the same manifold. Spatial scalar factorization is
+        # checked here, and upper/lower factorization is checked by that bridge.
         times = np.linspace(0, setup["trajectory"].get_T(), config["steps"])
         mids = (times[:-1] + times[1:]) / 2
         base = microwave_base_matrices_np(setup["microwave_fields"], trajectory=setup["trajectory"], t0=float(mids[0]), n=len(setup["hamiltonian"].QN))
@@ -87,7 +84,9 @@ def _worker(backend, indices, config, fingerprint, output, setup_path):
                 if not np.allclose(actual, amp[i, j] * base[j], atol=1e-10, rtol=1e-12):
                     raise ValueError("GPU scalar envelope does not reproduce this microwave field")
         run, sync = make_torch_runner(setup, n_steps=config["steps"], detunings=det,
-                                     intensity_prefactors=power, forward_velocities=velocities)
+                                     intensity_prefactors=power, forward_velocities=velocities,
+                                     rotating_eigh_chunk_size=config['gpu_time_chunk'],
+                                     max_eigh_matrices=config['gpu_max_eigh_matrices'])
         sync()
         preparation = time.perf_counter() - started
         propagation_started = time.perf_counter()
@@ -146,9 +145,15 @@ def main():
     parser.add_argument("--initial-states", type=int, default=4)
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--cpu-fraction", type=float, default=0.6)
+    parser.add_argument("--gpu-time-chunk", type=int, default=8,
+                        help="Full multitone GPU eigensolve time tile (default: 8)")
+    parser.add_argument("--gpu-max-eigh-matrices", type=int, default=256,
+                        help="Maximum matrices per multitone GPU eigensolve (default: 256)")
     args = parser.parse_args()
     if args.steps < 2 or args.batch < 1 or args.workers < 1 or args.initial_states < 1 or not 0 <= args.cpu_fraction <= 1:
         parser.error("steps>=2, batch/workers/initial-states>=1 and 0<=cpu-fraction<=1 required")
+    if args.gpu_time_chunk < 1 or args.gpu_max_eigh_matrices < 1:
+        parser.error("GPU time chunk and maximum eigensolve matrices must be >= 1")
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
     setup_path = args.setup_file.resolve() if args.setup_file else output / "setup.dill"
@@ -181,14 +186,15 @@ def main():
         if not np.isfinite(reference_speed) or reference_speed <= 0:
             parser.error("velocity scans require a finite positive reference forward velocity")
     config = dict(steps=args.steps, workers=args.workers, initial_states=args.initial_states,
-                  cpu_points=round(batch * args.cpu_fraction), batch=batch)
+                  cpu_points=round(batch * args.cpu_fraction), batch=batch,
+                  gpu_time_chunk=args.gpu_time_chunk, gpu_max_eigh_matrices=args.gpu_max_eigh_matrices)
     digest = hashlib.sha256(json.dumps(config, sort_keys=True).encode())
     for data in (setup_path.read_bytes(), det.tobytes(), power.tobytes()):
         digest.update(data)
     if velocities is not None:
         digest.update(b'forward_velocities')
         digest.update(velocities.tobytes())
-    for path in sorted((ROOT / "src").rglob("*.py")) + [Path(__file__), ROOT / "benchmarks" / "bench_gpu_spa2.py", ROOT / "benchmarks" / "common.py"]:
+    for path in sorted((ROOT / "src").rglob("*.py")) + [Path(__file__), ROOT / "benchmarks" / "bench_gpu_spa2.py", ROOT / "benchmarks" / "common.py", ROOT / "benchmarks" / "multitone_setup.py"]:
         digest.update(path.relative_to(ROOT).as_posix().encode())
         digest.update(path.read_bytes())
     fingerprint = digest.hexdigest()

@@ -14,10 +14,12 @@ from .slow_hamiltonian import (
     terms_from_centrex_tlf,
 )
 from .simulator import simulate_batched
+from .multitone import simulate_batched_multitone_shared_slow
 
 __all__ = [
     "BatchedSlowHamiltonianTerms",
     "slow_hamiltonian_batch",
     "terms_from_centrex_tlf",
     "simulate_batched",
+    "simulate_batched_multitone_shared_slow",
 ]

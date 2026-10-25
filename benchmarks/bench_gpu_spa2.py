@@ -32,6 +32,7 @@ def run_cpu(
     forward_velocities: Optional[np.ndarray] = None,
 ):
     from state_prep.simulator import Simulator
+    from multitone_setup import uses_multitone
 
     simulator = Simulator(
         setup["trajectory"],
@@ -51,6 +52,7 @@ def run_cpu(
         progress=False,
         workers=workers,
         forward_velocities=forward_velocities,
+        allow_multitone_same_manifold=uses_multitone(setup['microwave_fields']),
     )
 
 
@@ -64,6 +66,8 @@ def make_torch_runner(
     block_eigh: bool | str = "auto",
     slow_eigh_chunk_size: Optional[int] = None,
     forward_velocities: Optional[np.ndarray] = None,
+    rotating_eigh_chunk_size: int = 8,
+    max_eigh_matrices: int = 256,
 ):
     """Prepare a full PyTorch GPU propagation runner for the SPA2 scan."""
     import centrex_tlf
@@ -74,6 +78,13 @@ def make_torch_runner(
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA-enabled PyTorch is unavailable")
+
+    from multitone_setup import uses_multitone, make_multitone_torch_runner
+    if uses_multitone(setup['microwave_fields']):
+        return make_multitone_torch_runner(setup, n_steps=n_steps, detunings=detunings,
+            intensity_prefactors=intensity_prefactors, forward_velocities=forward_velocities,
+            complex_dtype=complex_dtype, slow_eigh_chunk_size=slow_eigh_chunk_size,
+            rotating_eigh_chunk_size=rotating_eigh_chunk_size, max_eigh_matrices=max_eigh_matrices)
 
     hamiltonian = setup["hamiltonian"]
     trajectory = setup["trajectory"]

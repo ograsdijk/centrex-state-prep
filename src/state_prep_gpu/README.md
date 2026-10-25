@@ -91,10 +91,56 @@ compares exact inputs once per call; it does not cache results across calls.
 
 Keep trajectory direction fixed when sampling the common path: changing only
 the forward component while retaining transverse speed would change the path.
-This scalar-envelope GPU route does not support same-manifold carrier beats;
-the existing scan launcher rejects those setups. The CPU multitone route does
-support them, with per-velocity beat phases and separate full eigensolves.
+For same-manifold carrier beats, use the multitone entry point described below.
+The scan launcher selects it automatically for distinct carriers. The CPU
+multitone route also supports per-velocity beat phases and full eigensolves.
 No Doppler correction is inferred from the supplied speeds.
+
+### RC backgrounds and multitone beats
+
+`state_prep_gpu.simulate_batched_multitone_shared_slow` supports an RC J12
+background at a different carrier from SPA J12. Supply the original fields'
+upper coupling matrices as `H_mu_upper_fields` `(M,n,n)`, scalar envelopes
+`amp_t` `(T-1,M)` or `(T-1,B,M)`, amplitude coupling scales `(B,M)`, and
+`beat_angular_frequencies` `(B,M)` in **rad/s** relative to the chosen frame
+reference. Zero frequency marks a static field. The lower component is the
+upper component's adjoint. `D_mu_diag_batch` must contain the reference-frame
+shifts, without adding a second frame shift for the RC carrier.
+
+`sample_times` are **seconds**, at the Hamiltonian evaluation points, with
+shape `(T-1,)` or `(T-1,B)`. The beat phase is
+`exp(-1j * beat_angular_frequencies * physical_sample_time)` on the upper
+component and its conjugate on the lower. Optional forward velocities scale
+both sample times and timesteps by reference speed / speed. Velocities with
+different beat phases retain separate full eigensolves.
+
+The default slow tile contains up to 128 samples and the full microwave tile
+up to eight. `max_eigh_matrices=256` caps the number of matrices in a solver
+call, splitting scan points when necessary and capping slow/time tiles too.
+Stored full eigensystems scale as time-tile size × batch × n²; the whole
+trajectory is never cached. These are dense solves, valid for transverse
+fields and mixed polarization, without an aligned-field assumption.
+Set `rotating_eigh_chunk_size=1` to use per-step full solves.
+
+State propagation, label tracking and history remain sequential. True initial
+fields (`E0`, `B0`), monitor mapping and final-only storage follow the other
+shared-slow entry point. Profiling accepts `profile_timings` on CUDA; tile
+intervals are amortized over their actual widths, including partial tails.
+Complex128 is the default prepared by the launcher and is recommended for
+long scientific runs; complex64 can accumulate substantially more norm error.
+
+The existing CPU/GPU launcher accepts a multitone setup file and automatically
+constructs the reference shifts, fixed RC detuning and beat frequencies from
+its parameter rows. Spatial envelope/polarization factorization is checked at
+every propagated sample before using this scalar-envelope route. There is no
+GPU Magnus implementation in this entry point.
+
+For launcher jobs, the optional `--gpu-time-chunk 16 --gpu-max-eigh-matrices 512`
+settings reduced runtime by another 3.6% in a 1,000-sample, 25-point RC check,
+but approximately doubled measured peak allocated memory. Defaults stay at
+8/256. These flags apply to the multitone route and are fingerprinted for
+checkpoint reuse; they do not change the scalar no-beat route. See
+`RC_PERFORMANCE.md` for repeated timings and memory conditions.
 
 ## Install PyTorch
 

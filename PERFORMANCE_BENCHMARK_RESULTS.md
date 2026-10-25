@@ -1,5 +1,97 @@
 # Performance Benchmark Results
 
+## RC J12 background: integrated CPU/GPU paths (2026-10-24)
+
+A further frozen-method check rejected the installed PyTorch CPU backend:
+2.637 ± 0.038 s for SciPy versus 2.924 ± 0.036 s per-step or 2.911 ± 0.092 s
+time-batched on PyTorch CPU (300 samples, 25 RC points, one thread). A GPU
+tile/workspace sweep at 1,000 samples measured 1.895 ± 0.027 s for default
+8/256 versus 1.827 ± 0.018 s for 16/512: 3.6% less time, but peak allocation
+rose from 515 MB to 961 MB. Time-32/1,024 was unproven. Defaults remain
+8/256; optional launcher controls are `--gpu-time-chunk` and
+`--gpu-max-eigh-matrices`. All measurements use one warmup and five
+interleaved repeats, with numerical agreement checked. Details and raw reports
+are in the follow-up section of [RC_PERFORMANCE.md](RC_PERFORMANCE.md).
+
+RC-specific measurements and implementation details are in
+[RC_PERFORMANCE.md](RC_PERFORMANCE.md). The setup includes a distinct RC carrier
+with mixed `z + 0.4 y` polarization; these results are not transferred from
+the no-beat velocity scan. Defaults preserve the CPU frozen integrator.
+
+One warmup and five interleaved repeats used 300 spatial samples, 25 points
+(five SPA detunings × five background powers), 64 states, four initial states,
+complex128, and RC offsets 0/-7.4 MHz from the zero-field transition:
+
+| RC offset | CPU Magnus before → cached, one worker | CPU frozen, four workers → tiled GPU frozen |
+| --- | ---: | ---: |
+| 0 MHz | 2.623 ± 0.035 → 1.673 ± 0.045 s (36.2% less runtime) | 1.423 ± 0.016 → 0.631 ± 0.038 s (55.7% less) |
+| -7.4 MHz | 2.440 ± 0.174 → 1.587 ± 0.030 s (35.0% less runtime) | 1.354 ± 0.022 → 0.598 ± 0.005 s (55.9% less) |
+
+Every claimed improvement passes paired 95% and combined-spread checks. CPU
+Magnus reuse preserves the existing integrator, including both beat senses and
+physical step-start timing. GPU support uses dense full eigensolves, real
+per-velocity beat times, bounded time/scan tiles and ordinary PyTorch status
+checks. It is selected automatically by the launcher for same-manifold tones.
+GPU array preparation and CPU setup construction are outside these timings;
+per-call grouping, scan preparation, tile construction and propagation are
+inside. Warm CPU workers and GPU completion synchronization are included.
+
+The full suite passed (282 tests). At 2,000 samples, 27 parameter/velocity
+points and both offsets, GPU frozen probabilities agreed with a CPU subset
+within 3.82e-9; the CPU Magnus cache matched its previous implementation in
+that longer check. An RC CPU/GPU launcher smoke check agreed within 3.31e-9
+and resumed its checkpoints. These are same-grid agreement checks, not RC
+timestep-convergence certification. Source, full conditions, raw-report paths
+and reproduction commands are in the linked report.
+
+## Velocity follow-up: four optimization candidates (2026-10-24)
+
+Benchmark-only experiments against current production (`0d6e981`) examined
+grouped state propagation, group-preserving CPU worker splits, full microwave
+eigensolve time tiles, and native GPU solver handle/workspace reuse. Full
+method, all cases, intervals, limitations and reproduction commands are in
+[VELOCITY_PERFORMANCE_INVESTIGATION.md](VELOCITY_PERFORMANCE_INVESTIGATION.md).
+Production defaults were not changed.
+
+The larger case used 300 spatial samples, 25 microwave parameter combinations
+× 10 velocities, 64 states, four initial states, complex128, varying transverse
+electric fields, and dense solves. One warmup and five interleaved repeats on
+the same Ryzen 7 9800X3D / RTX 5070 Ti measured:
+
+| Experiment | Current mean ± std | Candidate mean ± std | Assessment |
+| --- | ---: | ---: | --- |
+| CPU grouped propagation, one worker | 4.804 ± 0.204 s | 3.947 ± 0.179 s | 17.8% less runtime |
+| CPU group-preserving partition, four workers | 3.629 ± 0.028 s | 1.615 ± 0.014 s | 55.5% less runtime |
+| GPU grouped propagation alone | 1.091 ± 0.038 s | 1.062 ± 0.023 s | Unproven |
+| GPU full eigensolve time tile 8 | 1.091 ± 0.038 s | 0.662 ± 0.033 s | 39.3% less runtime |
+| GPU native workspace/handles, checked status | 1.091 ± 0.038 s | 1.084 ± 0.027 s | Unproven |
+| GPU native workspace/handles, deferred status | 1.091 ± 0.038 s | 1.033 ± 0.021 s | Unproven by combined-spread rule |
+
+The CPU worker gain depends on velocity-major input scattering identical
+microwave rows across processes; parameter-major input may already retain
+most reuse. Worker timing uses warmed reusable processes. All non-native
+improvements claimed above pass both paired 95% and combined-spread checks.
+
+In the smaller 150-sample, five-parameter × eight-velocity case, full time-8
+GPU tiles reduced runtime from 0.442 ± 0.014 s to 0.167 ± 0.005 s (62.3%).
+Native deferred status checks helped that case by 15%, but did not provide
+a proven extra win after time batching. A separate paired comparison of
+time-8 versus time-8 plus grouped updates measured 0.704 ± 0.033 s versus
+0.647 ± 0.021 s on the larger case: another 8.1% reduction. The smaller
+combined case remained unproven. These percentages are not additive.
+
+All repeated numerical comparisons passed. Twelve regression tests for the
+prototypes passed, covering CPU ragged groups and worker ordering plus
+CPU/CUDA histories, monitors and time-tile boundaries. Longer 1,000-sample,
+250-point GPU checks matched current GPU probabilities exactly in a common
+basis and a CPU subset within 2.13e-9; no speed claim uses that single check.
+
+Raw repeated reports are ignored files
+`results/velocity_followup_20261024.json` and
+`results/velocity_followup_combined_20261024.json`. The experiments support
+prioritizing CPU worker locality and bounded full GPU time tiling. Native
+solver integration has no demonstrated benefit on top of the latter.
+
 ## Shared spatial-grid velocity scans (2026-10-24)
 
 CPU `run_microwave_scan` and the GPU shared-slow scalar-envelope kernel now
