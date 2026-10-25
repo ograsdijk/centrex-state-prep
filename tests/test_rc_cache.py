@@ -2,15 +2,12 @@
 import numpy as np
 import pytest
 
-from bench_dense_investigation import patched
 from bench_velocity_scan import make_simulator
-from rc_prototypes import cpu_variant
-from state_prep import Simulator
 
 
 @pytest.mark.parametrize('velocity_scan', [False, True])
 @pytest.mark.parametrize('blocks', [False, True])
-def test_integral_cache_matches_before_for_powers_beats_and_velocities(spa2_setup, multitone_fields, velocity_scan, blocks):
+def test_integral_cache_matches_individual_scans_for_powers_beats_and_velocities(spa2_setup, multitone_fields, velocity_scan, blocks):
     setup = dict(spa2_setup, microwave_fields=multitone_fields)
     sim = make_simulator(setup,184.)
     det = np.zeros((6,3))
@@ -21,12 +18,20 @@ def test_integral_cache_matches_before_for_powers_beats_and_velocities(spa2_setu
         monitor_states=setup['monitor_states'])
     if velocity_scan:
         opts['forward_velocities'] = [150.,150.,150.,220.,220.,220.]
-    old = cpu_variant()
-    with patched(Simulator,'_time_evolve_mu_batched_shared_slow_multitone',old._time_evolve_mu_batched_shared_slow_multitone):
-        reference = sim.run_microwave_scan(**opts)
     actual = sim.run_microwave_scan(**opts)
-    np.testing.assert_allclose(actual.psis_final,reference.psis_final,atol=1e-10,rtol=1e-10)
-    np.testing.assert_allclose(actual.monitor_probabilities_final,reference.monitor_probabilities_final,atol=1e-10,rtol=1e-10)
+    # Single-point scans cannot reuse integrals across power points. They also
+    # provide a reference in source archives and shallow CI checkouts, without
+    # loading an older simulator from Git history.
+    references = []
+    for point in range(len(det)):
+        point_opts = dict(opts, detunings_hz=det[point:point+1],
+                          intensity_prefactors=powers[point:point+1])
+        if velocity_scan:
+            point_opts['forward_velocities'] = opts['forward_velocities'][point:point+1]
+        references.append(sim.run_microwave_scan(**point_opts))
+    for field in ('psis_final', 'monitor_probabilities_final'):
+        reference = np.concatenate([getattr(result, field) for result in references])
+        np.testing.assert_allclose(getattr(actual, field),reference,atol=1e-10,rtol=1e-10)
 
 
 def test_integrals_are_built_per_detuning_and_velocity_not_power(spa2_setup,multitone_fields,monkeypatch):
