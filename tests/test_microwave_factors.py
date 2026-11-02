@@ -1,8 +1,8 @@
 """The GPU scalar-envelope factorization must reproduce every field, including varying polarization."""
 import numpy as np
 
-from common import (microwave_amp_t_np, microwave_base_matrices_np, microwave_factors_np,
-                    microwave_upper_factors_np)
+from state_prep_gpu.microwave_factors import (microwave_amp_t_np, microwave_base_matrices_np, microwave_factors_np,
+                                               microwave_upper_factors_np)
 
 
 def _samples(setup, steps=400):

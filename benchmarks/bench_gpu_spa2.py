@@ -8,16 +8,15 @@ import numpy as np
 
 from common import (
     build_spa2_setup,
-    compute_eb_t,
     make_d_mu_diag_batch,
     make_detunings,
     make_payload,
-    microwave_factors_np,
     resolve_csv_path,
     result_row,
     time_call,
     write_results,
 )
+from state_prep_gpu.microwave_factors import compute_eb_t, microwave_factors_np
 from paired import compare_paired
 
 

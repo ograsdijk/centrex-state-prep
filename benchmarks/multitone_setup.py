@@ -13,7 +13,7 @@ def prepare_multitone_inputs(setup, detunings, powers, *, steps,
                              velocities=None, complex_dtype='complex128', device='cuda'):
     import centrex_tlf
     import torch
-    from common import compute_eb_t, microwave_upper_factors_np
+    from state_prep_gpu.microwave_factors import compute_eb_t, microwave_upper_factors_np
     from state_prep import Simulator
     from state_prep.microwaves import build_rotating_frame_shift
     from state_prep_gpu.slow_hamiltonian import terms_from_centrex_tlf

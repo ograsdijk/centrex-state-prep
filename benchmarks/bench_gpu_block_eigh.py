@@ -9,15 +9,13 @@ from bench_gpu_spa2 import make_scan_parameters
 from common import (
     add_nvidia_dll_paths,
     build_spa2_setup,
-    compute_eb_t,
     make_d_mu_diag_batch,
     make_payload,
-    microwave_amp_t_np,
-    microwave_base_matrices_np,
     resolve_csv_path,
     result_row,
     write_results,
 )
+from state_prep_gpu.microwave_factors import compute_eb_t, microwave_amp_t_np, microwave_base_matrices_np
 from paired import compare_paired, format_report
 
 

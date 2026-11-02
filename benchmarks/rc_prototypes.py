@@ -98,7 +98,7 @@ def make_gpu_runner(setup, detunings, powers, *, steps, full_chunk=0, velocities
     import centrex_tlf
     import numpy as np
     import torch
-    from common import compute_eb_t, microwave_amp_t_np
+    from state_prep_gpu.microwave_factors import compute_eb_t, microwave_amp_t_np
     from state_prep import Simulator
     from state_prep.microwaves import build_rotating_frame_shift
     from state_prep_gpu.slow_hamiltonian import terms_from_centrex_tlf

@@ -67,7 +67,7 @@ def _worker(backend, indices, config, fingerprint, output, setup_path):
         initial_vectors = np.stack([s.state_vector(setup["hamiltonian"].QN) for s in result.initial_states])
     else:
         import torch
-        from common import microwave_factors_np
+        from state_prep_gpu.microwave_factors import microwave_factors_np
 
         torch.set_num_threads(1)
         # The runner selects beat-correct multitone propagation when distinct

@@ -15,6 +15,13 @@ from .slow_hamiltonian import (
 )
 from .simulator import simulate_batched
 from .multitone import simulate_batched_multitone_shared_slow
+from .microwave_factors import (
+    compute_eb_t,
+    microwave_amp_t_np,
+    microwave_base_matrices_np,
+    microwave_factors_np,
+    microwave_upper_factors_np,
+)
 
 __all__ = [
     "BatchedSlowHamiltonianTerms",
@@ -22,4 +29,9 @@ __all__ = [
     "terms_from_centrex_tlf",
     "simulate_batched",
     "simulate_batched_multitone_shared_slow",
+    "compute_eb_t",
+    "microwave_amp_t_np",
+    "microwave_base_matrices_np",
+    "microwave_factors_np",
+    "microwave_upper_factors_np",
 ]
