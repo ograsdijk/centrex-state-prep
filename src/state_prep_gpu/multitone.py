@@ -37,6 +37,8 @@ def simulate_batched_multitone_shared_slow(
     rotating-frame carrier; zero marks a static field. sample_times are
     seconds, shape (T-1,) or (T-1,B), at the actual Hamiltonian samples.
     Their origin must match the beat phase convention (normally entrance t=0).
+    The upper (raising, <lower J|H|higher J>) component carries
+    exp(+i*beat*t) and the lower its conjugate, matching the CPU path.
 
     Optional forward velocities scale reference dt and sample_times by
     reference_forward_velocity / speed, preserving the supplied spatial path.
@@ -165,7 +167,7 @@ def simulate_batched_multitone_shared_slow(
                 phase = phase * traversal[None,point_start:point_end,None]
                 envelope = amp[tile_start:tile_end]
                 envelope = envelope[:,None] if amp.ndim == 2 else envelope[:,point_start:point_end]
-                weights = scales[None,point_start:point_end] * envelope * torch.exp(-1j*phase)
+                weights = scales[None,point_start:point_end] * envelope * torch.exp(1j*phase)
                 matrix = torch.einsum('tbm,tmij->tbij', weights.to(dtype),
                                       rotated_upper[local:local+width])
                 matrix = matrix + matrix.mH

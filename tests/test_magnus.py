@@ -180,7 +180,8 @@ def test_taylor_guard_handles_a_large_step_norm():
 
 # --- multitone -------------------------------------------------------------
 #
-# The multitone loop carries a beat phase `exp(-i*delta_omega*t)` inside `H_rot`
+# The multitone loop carries a beat phase `exp(+i*delta_omega*t)` (on the raising
+# component) inside `H_rot`
 # that rotates at the inter-tone detuning. The exact propagator freezes it at the
 # step's midpoint; Magnus integrates it. Nothing in the single-tone models can
 # tell those apart, so these cases score against a closed form.
@@ -224,8 +225,8 @@ def test_rotating_coupling_closed_form_solves_the_ode():
     which is ~`1e+10` below the smallest error it is used to measure.
     """
     model = am.rotating_coupling()
-    a = 0.5 * model.meta["beat"] * am.SZ
-    b = 0.5 * (model.meta["detuning"] - model.meta["beat"]) * am.SZ + 0.5 * model.meta[
+    a = -0.5 * model.meta["beat"] * am.SZ
+    b = 0.5 * (model.meta["detuning"] + model.meta["beat"]) * am.SZ + 0.5 * model.meta[
         "rabi"
     ] * am.SX
 
@@ -255,7 +256,7 @@ def test_rotating_coupling_agrees_with_an_independent_discretisation():
 def test_multitone_drive_is_near_resonance():
     """A counter-rotating parameterisation transfers nothing and tests nothing."""
     model = am.rotating_coupling()
-    assert abs(model.meta["detuning"] - model.meta["beat"]) < model.meta["rabi"]
+    assert abs(model.meta["detuning"] + model.meta["beat"]) < model.meta["rabi"]
     populations = np.abs(model.exact_states()[0]) ** 2
     assert populations.min() > 0.05, "drive must actually move population"
 

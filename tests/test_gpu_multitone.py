@@ -58,7 +58,7 @@ def cpu_reference(opts):
         # Slow term matrices are in Hz; propagation uses angular frequency.
         d,v = np.linalg.eigh(2*np.pi*(hff+e[i,0]*hsx+e[i,2]*hsz))
         for b in range(len(psi)):
-            hu = sum(scales[b,m]*amp[i,b,m]*np.exp(-1j*freq[b,m]*times[i]*traversal[b])*upper[m]
+            hu = sum(scales[b,m]*amp[i,b,m]*np.exp(1j*freq[b,m]*times[i]*traversal[b])*upper[m]
                      for m in range(len(upper)))
             h = v.conj().T @ (hu+hu.conj().T) @ v + np.diag(d+shifts[b])
             values,vectors = np.linalg.eigh(h)

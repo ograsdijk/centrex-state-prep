@@ -271,11 +271,14 @@ def magnus_integral(delta: np.ndarray, dt: float, shift: float = 0.0) -> np.ndar
 
     `shift` carries a coupling that itself rotates, which is what the multitone
     path needs. A field beating at `delta_omega` against the rotating-frame
-    carrier contributes `exp(-i*delta_omega*(t + s))` to the integrand, and the
-    `s` part merges into the oscillatory factor as
-    `exp(i*((d_i - d_j) - delta_omega)*s)`. So the raising component takes
-    `shift = -delta_omega` and the lowering component `shift = +delta_omega`,
-    with the residual `exp(-i*delta_omega*t)` left outside as a constant.
+    carrier contributes `exp(+i*delta_omega*(t + s))` to the raising component
+    (`<lower J|H|higher J>`, the upper triangle), and the `s` part merges into
+    the oscillatory factor as `exp(i*((d_i - d_j) + delta_omega)*s)`. So the
+    raising component takes `shift = +delta_omega` and the lowering component
+    `shift = -delta_omega`, with the residual `exp(+i*delta_omega*t)` left
+    outside as a constant. The sign follows from the frame: the higher level is
+    shifted by `-omega_carrier`, so a tone at `omega_carrier + delta_omega`
+    leaves `exp(+i*delta_omega*t)` on `|lower><higher|` after the RWA.
     Freezing that phase instead -- evaluating it once at `t_sample` and treating
     the coupling as static -- is wrong whenever `delta_omega * dt` is not small.
 
@@ -2565,7 +2568,7 @@ class Simulator:
                 lower_rot.append(Vh @ lower @ V)
 
             beat_phases = [
-                (field_idx, np.exp(-1j * delta_omega * t_sample * velocity_scales))
+                (field_idx, np.exp(1j * delta_omega * t_sample * velocity_scales))
                 for field_idx, delta_omega in beat_fields
             ] if propagator == "frozen" else []
             # The exact propagator freezes the beat at `t_sample` (midpoint
@@ -2591,11 +2594,11 @@ class Simulator:
                     # Each component needs its own oscillatory kernel. A beating
                     # field rotates at `delta_omega` *within* the step, so its
                     # raising part integrates against
-                    # `exp(i*((d_i - d_j) - delta_omega)*s)` and its lowering part
-                    # against `+delta_omega`. Reusing the static kernel with the
-                    # beat phase frozen at `t_sample` would be wrong whenever
-                    # `delta_omega * dt` is not small -- which is the regime this
-                    # path exists for.
+                    # `exp(i*((d_i - d_j) + delta_omega)*s)` and its lowering part
+                    # against `-delta_omega` (see `magnus_integral`). Reusing the
+                    # static kernel with the beat phase frozen at `t_sample` would
+                    # be wrong whenever `delta_omega * dt` is not small -- which
+                    # is the regime this path exists for.
                     group = int(kernel_groups[b])
                     cached = integrated_fields.get(group)
                     if cached is None:
@@ -2613,12 +2616,12 @@ class Simulator:
                             w = float(delta_omega_col[b])
                             # Anchor the oscillatory integral at physical step
                             # start, including the point's traversal time.
-                            beat = np.exp(-1j * w * t0_step * velocity_scales[b])
+                            beat = np.exp(1j * w * t0_step * velocity_scales[b])
                             fields.append((field_idx,
                                 beat * upper_rot[field_idx]
-                                * _magnus_integral_from_outer(outer, gaps, dt_point, -w)
+                                * _magnus_integral_from_outer(outer, gaps, dt_point, w)
                                 + beat.conjugate() * lower_rot[field_idx]
-                                * _magnus_integral_from_outer(outer, gaps, dt_point, w)))
+                                * _magnus_integral_from_outer(outer, gaps, dt_point, -w)))
                         cached = delta, fields
                         # Unique points need no retained matrices. Cache scope
                         # is one spatial step, never the complete trajectory.
