@@ -18,8 +18,10 @@ def test_real_rc_cpu_gpu_agreement(rc_setup,velocities):
     from bench_gpu_spa2 import make_torch_runner,run_cpu
     det,power,_ = make_grid([-1.,0.,0.5],[1.,4.],3,True)
     speeds = np.array([150.,184.,230.,150.,184.,230.]) if velocities else None
-    cpu = run_cpu(rc_setup,n_steps=160,detunings=det,intensity_prefactors=power,forward_velocities=speeds)
-    runner,sync = make_torch_runner(rc_setup,n_steps=160,detunings=det,
+    # 640 steps: the final states agree to ~1e-8 at any step count, but the monitor readouts differ by a
+    # step-size term (2.3e-5 at 160 steps, 2.8e-6 at 640) since the beat-sign fix puts this drive on resonance
+    cpu = run_cpu(rc_setup,n_steps=640,detunings=det,intensity_prefactors=power,forward_velocities=speeds)
+    runner,sync = make_torch_runner(rc_setup,n_steps=640,detunings=det,
         intensity_prefactors=power,forward_velocities=speeds,max_eigh_matrices=16)
     gpu = runner(store_every=37)
     sync()
@@ -28,4 +30,4 @@ def test_real_rc_cpu_gpu_agreement(rc_setup,velocities):
                                np.abs(cpu.psis_final@cpu.V_fin.conj())**2,atol=1e-5,rtol=1e-5)
     np.testing.assert_allclose(np.abs(np.sum(cpu.psis_final.conj()*vectors,axis=-1))**2,1,atol=1e-5)
     np.testing.assert_allclose(gpu.monitor_probabilities_final.cpu(),cpu.monitor_probabilities_final,atol=1e-5,rtol=1e-5)
-    assert gpu.history_indices[-1].item() == 159
+    assert gpu.history_indices[-1].item() == 639
