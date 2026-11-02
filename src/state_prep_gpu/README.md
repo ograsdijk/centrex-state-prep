@@ -109,8 +109,9 @@ shifts, without adding a second frame shift for the RC carrier.
 
 `sample_times` are **seconds**, at the Hamiltonian evaluation points, with
 shape `(T-1,)` or `(T-1,B)`. The beat phase is
-`exp(-1j * beat_angular_frequencies * physical_sample_time)` on the upper
-component and its conjugate on the lower. Optional forward velocities scale
+`exp(+1j * beat_angular_frequencies * physical_sample_time)` on the upper
+component (`<lower J|H|higher J>`) and its conjugate on the lower; the higher
+level carries the `-omega_ref` frame shift, so this is the RWA sign. Optional forward velocities scale
 both sample times and timesteps by reference speed / speed. Velocities with
 different beat phases retain separate full eigensolves.
 

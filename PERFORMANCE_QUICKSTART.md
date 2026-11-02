@@ -45,9 +45,13 @@ For your own setup, pass `--setup-file setup.dill`: a dill-serialized mapping
 with the same keys as `benchmarks.common.build_spa2_setup()`. Supply arbitrary
 detuning/power points with `--parameters points.npz`; it must contain matching
 `detunings_hz` and `intensity_prefactors` arrays of shape `(B, M)`. The launcher
-supports uniform midpoint frozen propagation. It rejects same-manifold beating
-and checks the GPU scalar microwave factorization at every propagated sample,
-so varying polarization cannot silently become a static-polarization model.
+supports uniform midpoint frozen propagation and rejects same-manifold beating.
+A field with constant polarization is propagated as one base matrix with a real
+envelope. A field whose polarization varies (switching, position dependence) is
+split into up to six fixed parts, the upper and lower triangles of its x/y/z
+couplings, with complex envelopes `pref E(t) p_k(t)` and the conjugate. The
+launcher checks this factorization against `MicrowaveField.get_H_t_func` at every
+propagated sample before running.
 
 The output directory contains:
 

@@ -45,10 +45,10 @@ def cpu_variant(*, components=False, kernels=False):
                                 fields.append((field_idx, (upper_rot[field_idx] + lower_rot[field_idx]) * static_kernel))
                         for field_idx, delta_omega_col in beat_fields:
                             w = float(delta_omega_col[b])
-                            beat = np.exp(-1j * w * t0_step * velocity_scales[b])
+                            beat = np.exp(1j * w * t0_step * velocity_scales[b])
                             fields.append((field_idx,
-                                beat * upper_rot[field_idx] * _magnus_integral_from_outer(outer, gaps, dt_point, -w)
-                                + beat.conjugate() * lower_rot[field_idx] * _magnus_integral_from_outer(outer, gaps, dt_point, w)))
+                                beat * upper_rot[field_idx] * _magnus_integral_from_outer(outer, gaps, dt_point, w)
+                                + beat.conjugate() * lower_rot[field_idx] * _magnus_integral_from_outer(outer, gaps, dt_point, -w)))
                         integrated_fields[group] = delta, fields
                     delta, fields = integrated_fields[group]
                     A = np.zeros((n, n), dtype=np.complex128)
@@ -63,8 +63,8 @@ def gpu_multitone(*, full_chunk=0):
     """Use Hermitian X/Y quadratures, with weights generated in bounded tiles.
 
     Bases are [X_0,...X_M,Y_0,...Y_M], where X=upper+lower and
-    Y=-i(upper-lower). cos(phi)*X+sin(phi)*Y is exactly the CPU
-    exp(-i*phi)*upper+exp(+i*phi)*lower Hamiltonian.
+    Y=-i(upper-lower). cos(phi)*X-sin(phi)*Y is exactly the CPU
+    exp(+i*phi)*upper+exp(-i*phi)*lower Hamiltonian.
     """
     import state_prep_gpu.simulator as module
     function = gpu_variant(full_chunk=full_chunk)
@@ -85,11 +85,11 @@ def gpu_multitone(*, full_chunk=0):
                      '        features = [coupling_scales, shift_features, rates]')
     if full_chunk:
         method = replace(method, '            shifts = D_mu_diag_batch', '''            phases = times[i:i + tile_end-offset, None, None] * rates[None]
-            weights = weights * torch.cat((torch.cos(phases), torch.sin(phases)), dim=-1)
+            weights = weights * torch.cat((torch.cos(phases), -torch.sin(phases)), dim=-1)
             shifts = D_mu_diag_batch''')
     else:
         method = replace(method, '        weights = coupling_scales * amp_i', '''        phases = times[i] * rates
-        weights = coupling_scales * amp_i * torch.cat((torch.cos(phases), torch.sin(phases)), dim=-1)''')
+        weights = coupling_scales * amp_i * torch.cat((torch.cos(phases), -torch.sin(phases)), dim=-1)''')
     source = source[:start] + method + source[end:]
     return clone(module, f'rc_gpu_{full_chunk}', source).simulate_batched_scalar_microwaves_shared_slow
 

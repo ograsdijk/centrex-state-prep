@@ -3,7 +3,8 @@
 Default setup is the benchmark SPA2 configuration. --setup-file accepts a dill
 file containing the same setup mapping (trajectory, fields, Hamiltonian,
 microwaves, initial_states, monitor_states). Only uniform midpoint frozen
-propagation and static-polarization scalar microwave envelopes are supported.
+propagation is supported. Fields with time-varying polarization are propagated as
+fixed x/y/z coupling parts with complex envelopes; same-manifold beating is not.
 """
 from __future__ import annotations
 
@@ -66,7 +67,7 @@ def _worker(backend, indices, config, fingerprint, output, setup_path):
         initial_vectors = np.stack([s.state_vector(setup["hamiltonian"].QN) for s in result.initial_states])
     else:
         import torch
-        from common import microwave_amp_t_np, microwave_base_matrices_np
+        from common import microwave_factors_np
 
         torch.set_num_threads(1)
         # The runner selects beat-correct multitone propagation when distinct
@@ -74,14 +75,17 @@ def _worker(backend, indices, config, fingerprint, output, setup_path):
         # checked here, and upper/lower factorization is checked by that bridge.
         times = np.linspace(0, setup["trajectory"].get_T(), config["steps"])
         mids = (times[:-1] + times[1:]) / 2
-        base = microwave_base_matrices_np(setup["microwave_fields"], trajectory=setup["trajectory"], t0=float(mids[0]), n=len(setup["hamiltonian"].QN))
-        amp = microwave_amp_t_np(setup["microwave_fields"], trajectory=setup["trajectory"], t_array=np.r_[mids, times[-1]])
+        # The same factorization make_torch_runner propagates: one part per
+        # static-polarization field, fixed x/y/z parts for varying polarization.
+        base, amp, owner = microwave_factors_np(setup["microwave_fields"], trajectory=setup["trajectory"],
+                                                t_array=np.r_[mids, times[-1]], n=len(setup["hamiltonian"].QN))
         # Validate the scalar factorization at every time actually propagated.
         for j, field in enumerate(setup["microwave_fields"]):
             ham = field.get_H_t_func(setup["trajectory"].R_t, setup["hamiltonian"].QN)
+            parts = owner == j
             for i, t in enumerate(mids):
                 actual = ham(float(t))
-                if not np.allclose(actual, amp[i, j] * base[j], atol=1e-10, rtol=1e-12):
+                if not np.allclose(actual, np.tensordot(amp[i, parts], base[parts], 1), atol=1e-10, rtol=1e-12):
                     raise ValueError("GPU scalar envelope does not reproduce this microwave field")
         run, sync = make_torch_runner(setup, n_steps=config["steps"], detunings=det,
                                      intensity_prefactors=power, forward_velocities=velocities,

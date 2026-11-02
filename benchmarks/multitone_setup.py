@@ -13,7 +13,7 @@ def prepare_multitone_inputs(setup, detunings, powers, *, steps,
                              velocities=None, complex_dtype='complex128', device='cuda'):
     import centrex_tlf
     import torch
-    from common import compute_eb_t, microwave_amp_t_np
+    from common import compute_eb_t, microwave_upper_factors_np
     from state_prep import Simulator
     from state_prep.microwaves import build_rotating_frame_shift
     from state_prep_gpu.slow_hamiltonian import terms_from_centrex_tlf
@@ -30,21 +30,19 @@ def prepare_multitone_inputs(setup, detunings, powers, *, steps,
                         magnetic_field=setup['magnetic_field'], t_array=np.r_[mids,grid[-1]])
     e0, b0 = compute_eb_t(trajectory=path, electric_field=setup['electric_field'],
                           magnetic_field=setup['magnetic_field'], t_array=np.array([0.]))
-    amplitude = microwave_amp_t_np(fields, trajectory=path, t_array=np.r_[mids,grid[-1]]).real
-    upper = []
+    # Upper parts with complex envelopes reproduce varying polarization too
+    # (switched RC tones); constant-polarization fields keep a single part.
+    upper, amplitude, owner = microwave_upper_factors_np(fields, trajectory=path,
+                                                         t_array=np.r_[mids,grid[-1]], n=n)
     for j, field in enumerate(fields):
         component = field.get_H_t_components_func(path.R_t, qn)
-        pol = np.asarray(field.p_t(float(mids[0])), dtype=complex)
-        u = sum(pol[axis]*np.triu(field.H_list[axis]) for axis in range(3))
-        l = sum(pol[axis].conj()*np.tril(field.H_list[axis]) for axis in range(3))
-        if not np.allclose(l, u.conj().T, atol=1e-12, rtol=1e-12):
-            raise ValueError('GPU multitone requires adjoint upper/lower components')
+        parts = owner == j
         for i, t in enumerate(mids):
             actual_u, actual_l = component(float(t))
-            if not (np.allclose(actual_u, amplitude[i,j]*u, atol=1e-10, rtol=1e-12)
-                    and np.allclose(actual_l, amplitude[i,j]*l, atol=1e-10, rtol=1e-12)):
-                raise ValueError('GPU multitone scalar envelopes do not reproduce spatially changing polarization')
-        upper.append(u)
+            u = np.tensordot(amplitude[i,parts], upper[parts], 1)
+            if not (np.allclose(actual_u, u, atol=1e-10, rtol=1e-12)
+                    and np.allclose(actual_l, u.conj().T, atol=1e-10, rtol=1e-12)):
+                raise ValueError('GPU multitone upper factorization does not reproduce this microwave field')
     shifts = build_rotating_frame_shift(fields, qn, detunings, skip_repeated_manifolds=True)[0]
     frequencies = np.zeros_like(detunings, dtype=float)
     references = {}
@@ -68,8 +66,9 @@ def prepare_multitone_inputs(setup, detunings, powers, *, steps,
         E0=tensor(e0[0],torch.float64), B0=tensor(b0[0],torch.float64),
         psi0=tensor(np.repeat(sim.psis[None],batch,axis=0)), dt=grid[1]-grid[0],
         H_mu_upper_fields=tensor(upper), amp_t=tensor(amplitude),
-        coupling_scales=tensor(np.sqrt(powers),torch.float64), D_mu_diag_batch=tensor(shifts),
-        sample_times=tensor(mids,torch.float64), beat_angular_frequencies=tensor(frequencies,torch.float64))
+        coupling_scales=tensor(np.sqrt(powers)[:,owner],torch.float64), D_mu_diag_batch=tensor(shifts),
+        sample_times=tensor(mids,torch.float64),
+        beat_angular_frequencies=tensor(frequencies[:,owner],torch.float64))
     monitors = setup.get('monitor_states')
     if monitors:
         inputs['monitor_state_vectors'] = tensor(np.stack([s.state_vector(qn) for s in monitors]))

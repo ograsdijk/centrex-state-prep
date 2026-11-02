@@ -12,8 +12,7 @@ from common import (
     make_d_mu_diag_batch,
     make_detunings,
     make_payload,
-    microwave_amp_t_np,
-    microwave_base_matrices_np,
+    microwave_factors_np,
     resolve_csv_path,
     result_row,
     time_call,
@@ -136,11 +135,10 @@ def make_torch_runner(
         qn=hamiltonian.QN,
         detunings_hz_batched=detunings,
     )
-    h_mu_fields = microwave_base_matrices_np(
-        microwave_fields, trajectory=trajectory, t0=float(t_mid[0]), n=len(hamiltonian.QN)
-    )
-    amp_t = microwave_amp_t_np(
-        microwave_fields, trajectory=trajectory, t_array=sample_times
+    # Static-polarization fields keep one base matrix; varying polarization is
+    # split into fixed x/y/z parts with complex envelopes.
+    h_mu_fields, amp_t, field_index = microwave_factors_np(
+        microwave_fields, trajectory=trajectory, t_array=sample_times, n=len(hamiltonian.QN)
     )
     inputs = {
         "E_t": torch.as_tensor(e_t, dtype=torch.float64, device=device),
@@ -149,7 +147,7 @@ def make_torch_runner(
         "H_mu_base_fields": torch.as_tensor(h_mu_fields, dtype=dtype, device=device),
         "amp_t": torch.as_tensor(amp_t, dtype=dtype, device=device),
         "coupling_scales": torch.as_tensor(
-            np.sqrt(intensity_prefactors), dtype=torch.float64, device=device
+            np.sqrt(intensity_prefactors)[:, field_index], dtype=torch.float64, device=device
         ),
         "D_mu_diag_batch": torch.as_tensor(d_mu_diag, dtype=dtype, device=device),
         "E0": torch.as_tensor(e0[0], dtype=torch.float64, device=device),
