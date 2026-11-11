@@ -1,5 +1,83 @@
 # Performance Benchmark Results
 
+## CPU coupled-subspace solves: `coupling_tolerance` (2026-11-11)
+
+`run_microwave_scan(..., coupling_tolerance=...)` restricts each scan point's
+rotating-frame eigensolve to the slow eigenstates the microwaves couple
+appreciably. The shared slow Hamiltonian is still diagonalized in the full
+basis every timestep, so every J manifold keeps contributing level shifts and
+admixtures; this is not a basis truncation. In the slow eigenbasis the DC
+fields are diagonal and the only off-diagonal terms are microwave couplings. A
+coupling is dropped when `|C_ij| <= tol * |d_i - d_j|` for every scan point;
+connected components of what remains are solved as blocks and isolated states
+only acquire their phase. The option is off by default, is an approximation
+(unlike `block_eigh`), requires the frozen propagator, and is not implemented
+for the multitone same-manifold path or the GPU path.
+
+Baseline and candidate are the same code with the option off and on
+(`tol = 1e-8`), one worker, one BLAS thread, default `block_eigh=True`, four
+initial states, one warmup and five interleaved repeats, sample standard
+deviations. SPA2 is J=1→2 with `Js=0..3` (64 states); the cascade is J=0→1→2
+with `Js=0..4` (100 states). `varying_e` and `transverse_b` are the synthetic
+non-collinear probes from `profile_transverse_fields.py`, not measured field
+maps. "Max ΔP" is the largest change in any final probability.
+
+| Case | States | Steps | Points | Full solve mean ± std | `tol=1e-8` mean ± std | Speedup | Max ΔP |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| SPA2 aligned | 64 | 300 | 25 | 1.010 ± 0.006 s | 0.838 ± 0.016 s | 1.21× | 5.2e-9 |
+| SPA2 aligned | 64 | 1000 | 25 | 3.279 ± 0.034 s | 2.727 ± 0.071 s | 1.20× | 4.1e-9 |
+| SPA2 aligned | 64 | 300 | 100 | 3.311 ± 0.006 s | 2.458 ± 0.014 s | 1.35× | 5.2e-9 |
+| SPA2 varying E | 64 | 300 | 25 | 2.323 ± 0.003 s | 1.021 ± 0.006 s | 2.27× | 5.9e-9 |
+| SPA2 varying E | 64 | 1000 | 25 | 7.787 ± 0.030 s | 3.402 ± 0.012 s | 2.29× | 5.0e-9 |
+| SPA2 varying E | 64 | 300 | 100 | 8.675 ± 0.058 s | 3.282 ± 0.013 s | 2.64× | 5.9e-9 |
+| SPA2 transverse B | 64 | 300 | 25 | 2.322 ± 0.004 s | 1.017 ± 0.004 s | 2.28× | 4.4e-9 |
+| SPA2 transverse B | 64 | 1000 | 25 | 7.717 ± 0.025 s | 3.377 ± 0.016 s | 2.28× | 3.5e-9 |
+| SPA2 transverse B | 64 | 300 | 100 | 8.624 ± 0.030 s | 3.290 ± 0.013 s | 2.62× | 6.0e-9 |
+| Cascade aligned | 100 | 300 | 25 | 1.803 ± 0.011 s | 1.203 ± 0.014 s | 1.50× | 1.5e-9 |
+| Cascade aligned | 100 | 1000 | 25 | 5.963 ± 0.012 s | 3.926 ± 0.006 s | 1.52× | 1.1e-9 |
+| Cascade varying E | 100 | 300 | 25 | 6.182 ± 0.021 s | 1.528 ± 0.003 s | 4.05× | 1.5e-9 |
+| Cascade varying E | 100 | 1000 | 25 | 20.519 ± 0.112 s | 5.073 ± 0.008 s | 4.04× | 1.6e-9 |
+
+Every row passes both the paired 95% interval and the combined-spread rule.
+Maximum physical state infidelity against the full solve was 4.5e-11.
+
+Reading the result:
+
+- Aligned fields gain least because exact blocks already split the problem.
+  Non-collinear fields have no exact blocks, so the baseline solves the full
+  matrix per point and the gain is largest.
+- The gain grows with batch size, since the shared per-timestep work (slow
+  solve, coupling rotation, block detection) is amortized over more points.
+- Prototype screening (not protocol-grade, 3–5 repeats) found the error
+  tracks the tolerance: about 4e-7 to 1e-6 at `tol=1e-6`, and did not grow
+  from 300 to 4,000 steps. A second-order (AC Stark) correction for the
+  dropped couplings changed nothing measurable and was not implemented.
+- For scale, truncating the cascade *basis* to `Js=0..2` instead changed final
+  populations by up to 0.88 on the same grid. The two are different operations.
+
+Limits: these are same-grid agreement checks at short step counts, not
+timestep-convergence claims. Only SPA2 and the two-rung cascade were tested;
+high-field setups with stronger J mixing, higher microwave powers and
+`workers > 1` timing were not. With `workers > 1` each chunk chooses its own
+block layout, so output agrees with serial to the tolerance rather than
+bitwise. With blocks this small the Python loop is a larger share of the
+remaining runtime, so the earlier native-port ceiling (measured with full-size
+solves) does not transfer to this path.
+
+Thirteen regression tests cover agreement on SPA2 and the cascade, dense
+fields with a bound on per-point solve size, velocity groups, worker chunks,
+rejected inputs, and the block helpers. The full suite passed.
+
+```powershell
+$env:PYTHONPATH = "$PWD\src"
+& $python benchmarks/bench_coupling_tolerance.py --cases spa2_aligned spa2_varying_e spa2_transverse_b --output results/coupling_tolerance_spa2_new.json
+& $python benchmarks/bench_coupling_tolerance.py --cases cascade_aligned cascade_varying_e --shapes 300:25 1000:25 --output results/coupling_tolerance_cascade_new.json
+```
+
+Raw reports are the ignored files
+`results/coupling_tolerance_20261111_spa2.json` and
+`results/coupling_tolerance_20261111_cascade.json`.
+
 ## RC J12 background: integrated CPU/GPU paths (2026-10-24)
 
 A further frozen-method check rejected the installed PyTorch CPU backend:
