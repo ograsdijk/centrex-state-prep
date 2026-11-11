@@ -146,6 +146,13 @@ is substantial. Detection includes the active field and microwave couplings
 across the sampled trajectory, so transverse terms or differently oriented
 microwaves can merge blocks. Use `block_eigh=False` to force dense eigensolves.
 
+`run_microwave_scan(..., coupling_tolerance=1e-8)` is an opt-in approximation
+that restricts each scan point's eigensolve to the slow eigenstates the
+microwaves couple appreciably. The slow Hamiltonian is still solved in the full
+basis, so it is not a basis truncation, and it also helps with non-collinear
+fields where no exact blocks exist. Check a new setup against the default
+(`None`) first; see the docstring and `PERFORMANCE_BENCHMARK_RESULTS.md`.
+
 For a cascade using distinct microwave carriers, list fields in low-to-high
 rotational order (for example J = 0 -> 1, then J = 1 -> 2). The rotating-frame
 shift for an upper rung includes the carrier and detuning of every rung below it.

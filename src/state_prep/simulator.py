@@ -10,6 +10,7 @@ from joblib import Parallel, delayed, effective_n_jobs
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.linalg.lapack import zheevd
+from scipy.sparse.csgraph import connected_components
 from threadpoolctl import threadpool_limits
 from tqdm import tqdm
 
@@ -178,6 +179,94 @@ def _eigh_in_blocks(
 def _indices_for_block_labels(labels: np.ndarray) -> List[np.ndarray]:
     """Return eigenvector-column groups for each block ID."""
     return [np.flatnonzero(labels == block_id) for block_id in np.unique(labels)]
+
+
+def _shift_difference_bounds(shifts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Bound `shifts[b, i] - shifts[b, j]` over the batch, for every pair.
+
+    Returns `(lo, hi)`, each `(n, n)`. Computed once per scan, so the per-step
+    gap bound in `_coupled_eigen_blocks` does not grow with batch size.
+    """
+    rows = np.unique(np.asarray(shifts, dtype=float), axis=0)
+    lo = rows[0][:, None] - rows[0][None, :]
+    hi = lo.copy()
+    for row in rows[1:]:
+        difference = row[:, None] - row[None, :]
+        np.minimum(lo, difference, out=lo)
+        np.maximum(hi, difference, out=hi)
+    return lo, hi
+
+
+def _coupled_eigen_blocks(
+    coupling_bound: np.ndarray,
+    energies: np.ndarray,
+    shift_lo: np.ndarray,
+    shift_hi: np.ndarray,
+    tolerance: float,
+) -> tuple[np.ndarray, List[np.ndarray]]:
+    """Group slow eigenstates that the microwaves couple appreciably.
+
+    Works in the shared slow eigenbasis, where the DC fields are already
+    diagonal and the only off-diagonal terms are microwave couplings. A coupling
+    is kept when `|C_ij| > tolerance * |d_i - d_j|` for *any* scan point:
+    `coupling_bound` is the largest coupling over the batch and the gap is the
+    smallest rotating-frame gap the batch can reach, taken over the whole
+    interval `[shift_lo, shift_hi]` rather than the discrete points, so the
+    test errs towards keeping a coupling.
+
+    Returns the indices of isolated states, which only acquire a phase, and the
+    connected components of the kept couplings, which are solved as blocks.
+    Exactly decoupled states are isolated at any tolerance.
+    """
+    gap = energies[:, None] - energies[None, :]
+    lo = gap + shift_lo
+    hi = gap + shift_hi
+    gap = np.minimum(np.abs(lo), np.abs(hi))
+    gap[(lo <= 0) & (hi >= 0)] = 0.0
+    adjacency = coupling_bound > tolerance * gap
+    np.fill_diagonal(adjacency, False)
+    n_components, labels = connected_components(adjacency, directed=False)
+    counts = np.bincount(labels, minlength=n_components)
+    isolated = np.flatnonzero(counts[labels] == 1)
+    blocks = [np.flatnonzero(labels == k) for k in np.flatnonzero(counts > 1)]
+    return isolated, blocks
+
+
+def _solve_coupled_blocks(
+    matrix: np.ndarray,
+    isolated: np.ndarray,
+    blocks: List[np.ndarray],
+    eig_backend: str,
+) -> tuple[np.ndarray, list]:
+    """Diagonalize only the coupled blocks of a rotating-frame Hamiltonian."""
+    solutions = []
+    for indices in blocks:
+        submatrix = np.ascontiguousarray(matrix[indices[:, None], indices])
+        if eig_backend == "zheevd":
+            values, vectors, info = zheevd(submatrix)
+            if info != 0:
+                values, vectors = np.linalg.eigh(submatrix)
+        elif eig_backend == "numpy":
+            values, vectors = np.linalg.eigh(submatrix)
+        else:
+            raise ValueError("Unknown eig_backend. Expected 'zheevd' or 'numpy'.")
+        solutions.append((indices, values, vectors))
+    return matrix.diagonal().real[isolated], solutions
+
+
+def _apply_coupled_solution(
+    psis: np.ndarray,
+    isolated: np.ndarray,
+    solution: tuple[np.ndarray, list],
+    dt: float,
+) -> None:
+    """Propagate `psis` (S, n) in place with a `_solve_coupled_blocks` result."""
+    isolated_energies, solutions = solution
+    psis[:, isolated] *= np.exp(-1j * isolated_energies * dt)
+    for indices, values, vectors in solutions:
+        tmp = psis[:, indices] @ vectors.conj()
+        tmp *= np.exp(-1j * values * dt)
+        psis[:, indices] = tmp @ vectors.T
 
 
 def _sample_offset(time_sampling: str) -> float:
@@ -1739,6 +1828,7 @@ class Simulator:
         propagator: str = "frozen",
         block_eigh: bool = True,
         forward_velocities: Optional[np.ndarray] = None,
+        coupling_tolerance: Optional[float] = None,
     ) -> MicrowaveScanResult:
         """Run a batched microwave scan reusing the slow diagonalization.
 
@@ -1881,10 +1971,42 @@ class Simulator:
             all configured microwave fields; detunings are diagonal and power
             prefactors do not change the coupling support. Dense eigensolves are
             used when no split is found. Set False to force dense solves.
+
+        coupling_tolerance:
+            `None` (default) solves the full rotating-frame eigenproblem for
+            every scan point, unchanged from previous behaviour. A small
+            positive value restricts each per-point solve to the slow
+            eigenstates the microwaves couple appreciably.
+
+            - The slow Hamiltonian is still diagonalized in the full basis every
+              timestep, so every J manifold keeps contributing its level shifts
+              and admixtures. Only the per-point solve shrinks: a microwave
+              coupling between two slow eigenstates is dropped when
+              `|C_ij| <= coupling_tolerance * |d_i - d_j|` for every scan point,
+              with `d` the rotating-frame energies. States left with no coupling
+              only acquire their phase. This is *not* a basis truncation.
+            - Unlike `block_eigh` it is an approximation, and it also works with
+              non-collinear DC fields, which are diagonal in the slow
+              eigenbasis. If the couplings do not separate, the blocks grow back
+              towards the full problem: speed is lost, not accuracy.
+            - Measured on SPA2 and the SPA1+SPA2 cascade: `1e-8` changes final
+              probabilities by below `1e-8`, `1e-6` by about `1e-6`. Check a new
+              setup against `coupling_tolerance=None` before relying on it.
+            - The block layout is chosen once per timestep for the batch being
+              run, so `workers>1` chunks may choose different layouts. Results
+              then agree with the serial run to the tolerance, not bitwise.
+            - Requires `propagator="frozen"`; not available on the multitone
+              same-manifold path.
         """
         # Validate here, not only in the loops, so a bad name is rejected before
         # any work is done rather than on the first timestep.
         propagator = _normalize_propagator(propagator)
+        if coupling_tolerance is not None:
+            coupling_tolerance = float(coupling_tolerance)
+            if not 0.0 < coupling_tolerance < 1.0:
+                raise ValueError("coupling_tolerance must be None or in (0, 1)")
+            if propagator != "frozen":
+                raise ValueError("coupling_tolerance requires propagator='frozen'")
 
         if N_steps < 2:
             raise ValueError("N_steps must be >= 2")
@@ -1974,6 +2096,10 @@ class Simulator:
                 f"excited-J manifold(s) {multitone_jes}. Use "
                 "allow_multitone_same_manifold=True to enable the two-tone path."
             )
+        if multitone_jes and coupling_tolerance is not None:
+            raise ValueError(
+                "coupling_tolerance is not supported on the multitone same-manifold path"
+            )
         if workers != 1 and batch > 1:
             return self._run_microwave_scan_parallel_loky(
                 detunings_hz=det_b,
@@ -1987,6 +2113,7 @@ class Simulator:
                 workers=workers,
                 allow_multitone_same_manifold=allow_multitone_same_manifold,
                 block_eigh=block_eigh,
+                coupling_tolerance=coupling_tolerance,
                 blas_threads=blas_threads,
                 step_density=step_density,
                 step_density_order=step_density_order,
@@ -2103,6 +2230,13 @@ class Simulator:
                     time_sampling=time_sampling,
                     propagator=propagator,
                     eigen_blocks=eigen_blocks,
+                    # Passed only when set, so benchmark copies of this loop
+                    # that predate the option keep working.
+                    **(
+                        {}
+                        if coupling_tolerance is None
+                        else {"coupling_tolerance": coupling_tolerance}
+                    ),
                 )
 
         return MicrowaveScanResult(
@@ -2145,6 +2279,7 @@ class Simulator:
         propagator: str = "frozen",
         block_eigh: bool = True,
         forward_velocities: Optional[np.ndarray] = None,
+        coupling_tolerance: Optional[float] = None,
     ) -> MicrowaveScanResult:
         propagator = _normalize_propagator(propagator)
         batch = int(detunings_hz.shape[0])
@@ -2168,6 +2303,7 @@ class Simulator:
                 time_sampling=time_sampling,
                 propagator=propagator,
                 block_eigh=block_eigh,
+                coupling_tolerance=coupling_tolerance,
                 forward_velocities=forward_velocities,
             )
 
@@ -2192,6 +2328,7 @@ class Simulator:
                 time_sampling=time_sampling,
                 propagator=propagator,
                 block_eigh=block_eigh,
+                coupling_tolerance=coupling_tolerance,
                 forward_velocities=None if forward_velocities is None else forward_velocities[indices],
             )
 
@@ -2252,12 +2389,15 @@ class Simulator:
         propagator: str = "frozen",
         eigen_blocks: Optional[List[np.ndarray]] = None,
         time_scales: Optional[np.ndarray] = None,
+        coupling_tolerance: Optional[float] = None,
     ):
         """Batched microwave evolution with shared slow diagonalization.
 
         This is a CPU-only batched variant of `_time_evolve_mu` where H_slow(t)
         is identical across the batch and is diagonalized only once per timestep.
         """
+        if coupling_tolerance is not None and propagator != "frozen":
+            raise ValueError("coupling_tolerance requires propagator='frozen'")
         # Validate batch shapes
         if D_mu_diag_batch.ndim != 2:
             raise ValueError("D_mu_diag_batch must have shape (B,n)")
@@ -2327,6 +2467,9 @@ class Simulator:
         # appreciably within a step, integrating beats freezing.
         propagator = _normalize_propagator(propagator)
         gap_tracker = LabelGapTracker(len(self.hamiltonian.QN))
+        if coupling_tolerance is not None:
+            shift_lo, shift_hi = _shift_difference_bounds(D_mu_diag_batch)
+            max_coupling_scales = np.abs(coupling_scales).max(axis=0)
         for i, t in enumerate(tqdm(t_array[:-1], disable=not progress)):
             dt = t_array[i + 1] - t_array[i]
             t_sample = t + sample_offset * dt
@@ -2368,10 +2511,29 @@ class Simulator:
                 if eigen_blocks is not None else None
             )
 
+            # Optional: restrict the per-point solve to the slow eigenstates the
+            # microwaves actually couple. One layout per timestep, valid for the
+            # whole batch. Unlike `eigen_blocks` this is approximate, bounded by
+            # `coupling_tolerance`, and it survives non-collinear DC fields
+            # because those are already diagonal in this basis.
+            coupled = None
+            if coupling_tolerance is not None:
+                coupling_bound = max_coupling_scales[0] * np.abs(H_mu_rot[0])
+                for j in range(1, len(H_mu_rot)):
+                    coupling_bound += max_coupling_scales[j] * np.abs(H_mu_rot[j])
+                coupled = _coupled_eigen_blocks(
+                    coupling_bound, D, shift_lo, shift_hi, coupling_tolerance
+                )
+
             solved = {}
             for b in range(batch):
                 dt_point = dt * velocity_scales[b]
                 group = int(solve_groups[b])
+                if coupled is not None and group in solved:
+                    _apply_coupled_solution(
+                        psis_slow[b], coupled[0], solved[group], dt_point
+                    )
+                    continue
                 if propagator == "frozen" and group in solved:
                     D_rot, V_rot = solved[group]
                     tmp2 = psis_slow[b] @ V_rot.conj()
@@ -2406,6 +2568,17 @@ class Simulator:
                 # Add detunings + slow energies to diagonal
                 H_rot.flat[diag_idx] += D
                 H_rot.flat[diag_idx] += D_mu_diag_batch[b]
+
+                if coupled is not None:
+                    solution = _solve_coupled_blocks(
+                        H_rot, coupled[0], coupled[1], eig_backend
+                    )
+                    if time_scales is not None:
+                        solved[group] = solution
+                    _apply_coupled_solution(
+                        psis_slow[b], coupled[0], solution, dt_point
+                    )
+                    continue
 
                 # Diagonalize rotating-frame Hamiltonian (per scan point)
                 if eigen_blocks is not None:

@@ -85,6 +85,8 @@ flattened rows.
   per-scan-point work and reports the Amdahl ceiling that implies.
 - `bench_eig_backends.py` — eigensolver × BLAS threads × parallelism grid.
 - `bench_trotter_conditioning.py` — exact versus split-step propagator.
+- `bench_coupling_tolerance.py` — full per-point solves versus
+  `coupling_tolerance`, on SPA2 and the cascade, aligned and non-collinear.
 - `paired.py` — the before/after runner. Use it rather than timing pairs.
 
 Every benchmark writes JSON with `benchmark`, `generated_at`, `environment`,
@@ -177,6 +179,15 @@ instead of looping `run()` whenever `H_slow(t)` is identical across points.
   where process startup dominates, and there is no automatic size-based
   fallback, so keep `workers=1` there. `workers=1` never enters the loky path at
   all.
+- `coupling_tolerance` (default `None`, off) restricts each per-point
+  rotating-frame solve to the slow eigenstates the microwaves couple
+  appreciably: a coupling is dropped when `|C_ij| <= tol * |d_i - d_j|` for
+  every scan point, and states left uncoupled only acquire a phase. The slow
+  solve stays full size, so this is not a basis truncation. It is approximate
+  (unlike `block_eigh`), works with non-collinear fields, needs
+  `propagator="frozen"`, and is not available on the multitone path. With
+  `workers > 1` results agree with serial to the tolerance, not bitwise.
+  Measure with `benchmarks/bench_coupling_tolerance.py`.
 - Multiple tones shifting the same excited-J manifold are rejected unless
   `allow_multitone_same_manifold=True`, which keeps the first field as the
   rotating-frame reference and applies a beat phase to the rest.
